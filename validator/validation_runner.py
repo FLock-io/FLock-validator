@@ -1,7 +1,6 @@
 import importlib
 import time
 import sys
-from unittest.mock import Base
 from loguru import logger
 from .exceptions import RecoverableException
 from .api import FedLedger
@@ -119,7 +118,7 @@ class ValidationRunner:
                 task_submission_data = resp.json()["task_submission"]["data"]
                 validation_assignment_data = resp.json()["data"]
                 merged_data = {**task_submission_data, **validation_assignment_data}
-                input_data = module_obj.input_data_schema.model_validate_json(merged_data)
+                input_data = module_obj.input_data_schema.model_validate(merged_data)
                 assignment_id = resp.json()["id"]
                 
                 metrics = self.perform_validation(assignment_id, task_id, input_data)

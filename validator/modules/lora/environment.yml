@@ -1,4 +1,23 @@
 name: lora
+channels:
+  - conda-forge
+  - defaults
 dependencies:
-  - numpy
-  - pandas
+  - pytorch>=1.13.1
+  - transformers=4.49.0
+  - peft>=0.10.0
+  - datasets>=2.14.3
+  - accelerate>=0.27.2
+  - tqdm=4.62.3
+  - click
+  - sentencepiece
+  - protobuf
+  - tiktoken
+  - einops
+  - tenacity
+  - pip
+  - pip:
+    - huggingface-hub==0.29.1
+    - transformers_stream_generator
+    - python-dotenv
+    - gitpython
