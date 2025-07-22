@@ -1,5 +1,6 @@
 from validator.exceptions import RecoverableException
 from validator.modules.base import BaseValidationModule, BaseConfig, BaseInputData, BaseMetrics
+from constant import SUPPORTED_BASE_MODELS
 
 # When raised, the assignment won't be marked as failed automatically and it will be retried after the user
 # fixes the problem and restarts the process.
@@ -134,6 +135,9 @@ class LoRAValidationModule(BaseValidationModule):
                     )
                     raise InvalidConfigValueException(f"adapter_config.json not found for LoRA model {model_repo}. ")
             else:
+                logger.info(
+                    f"Model {model_repo} is a LoRA model. Validating its base model for tokenizer."
+                )
                 try:
                     with open(adapter_cfg_path, "r") as f:
                         adapter_cfg = json.load(f)
@@ -144,7 +148,10 @@ class LoRAValidationModule(BaseValidationModule):
                             f"LoRA model {model_repo} does not specify 'base_model_name_or_path' "
                         )
                         return # exit function early 
-
+                    if base_model_path not in SUPPORTED_BASE_MODELS: # need to define SUPPORTED_BASE_MODELS
+                        logger.error(
+                            f"LoRA's base model '{base_model_path}' is not in SUPPORTED_BASE_MODELS. "
+                        ) 
                     tokenizer_repo = base_model_path
 
                 except (FileNotFoundError, JSONDecodeError) as e: # case where adapter_config.json is missing is already handled
