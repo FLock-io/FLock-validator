@@ -147,11 +147,14 @@ class LoRAValidationModule(BaseValidationModule):
                         logger.error(
                             f"LoRA model {model_repo} does not specify 'base_model_name_or_path' "
                         )
-                        return # exit function early 
+                        raise InvalidConfigValueException(f"LoRA model {model_repo} does not specify 'base_model_name_or_path'.")
                     if base_model_path not in SUPPORTED_BASE_MODELS: # need to define SUPPORTED_BASE_MODELS
                         logger.error(
                             f"LoRA's base model '{base_model_path}' is not in SUPPORTED_BASE_MODELS. "
                         ) 
+                        raise InvalidConfigValueException(
+                            f"LoRA's base model '{base_model_path}' is not from a supported list."
+                        )
                     tokenizer_repo = base_model_path
 
                 except (FileNotFoundError, JSONDecodeError) as e: # case where adapter_config.json is missing is already handled
