@@ -1,0 +1,8 @@
+name: llm_judge
+dependencies:
+  - python>=3.8
+  - pip
+  - pip:
+    - openai>=1.0.0  # OpenAI API client
+    - httpx  # HTTP client for OpenAI requests
+    - pydantic>=2.0.0  # Data validation and parsing
