@@ -29,7 +29,8 @@ class LLMJudgeException(RecoverableException):
 
 class LLMJudgeConfig(BaseConfig):
     temperature: float = 0.7
-    max_tries: int = 3
+    max_eval_try: int = 3
+    max_gen_try: int = 1  # Number of attempts to generate responses for each input
 
 
 class LLMJudgeMetrics(BaseMetrics):
@@ -203,19 +204,105 @@ class LLMJudgeValidationModule(BaseValidationModule):
         except Exception as e:
             raise LLMJudgeException(f"Failed to generate response: {e}")
 
-    def _call_gpt(self, messages: List[Dict[str, str]], model: str) -> str:
+    def _select_eval_model(self, eval_args: dict) -> str:
+        """
+        Select evaluation model based on eval_args configuration
+        """
+        eval_model_list = eval_args.get("eval_model_list", [])
+
+        if eval_model_list:
+            # Check if all models in eval_model_list are available
+            available_eval_models = [
+                model for model in eval_model_list if model in self.available_models
+            ]
+
+            if len(available_eval_models) == len(eval_model_list):
+                selected_model = random.choice(eval_model_list)
+                print(f"Using eval_model_list: selected {selected_model}")
+                return selected_model
+
+        # random selection from available models
+        selected_model = random.choice(self.available_models)
+        return selected_model
+
+    def _normalize_score(
+        self, score: float, min_score: float = 1.0, max_score: float = 10.0
+    ) -> float:
+        """
+        Normalize score to (0, 1) range
+
+        Args:
+            score: Original score
+            min_score: Minimum possible score (default: 1.0)
+            max_score: Maximum possible score (default: 10.0)
+
+        Returns:
+            Normalized score in (0, 1) range
+        """
+        if max_score == min_score:
+            return 0.5  # Return middle value if range is zero
+
+        # Normalize to [0, 1] range
+        normalized = (score - min_score) / (max_score - min_score)
+
+        # Ensure the result is strictly in (0, 1) range, not [0, 1]
+        # Add small epsilon to avoid exact 0 or 1
+        epsilon = 1e-8
+        normalized = max(epsilon, min(1.0 - epsilon, normalized))
+
+        return normalized
+
+    def _call_gpt(
+        self, messages: List[Dict[str, str]], eval_args: dict
+    ) -> tuple[str, str]:
+        """
+        Call GPT API with model and temperature from eval_args
+
+        Args:
+            messages: Chat messages
+            eval_args: Evaluation arguments containing model and temperature config
+
+        Returns:
+            Tuple of (API response content, selected model name)
+        """
+        selected_model = self._select_eval_model(eval_args)
+        temperature = eval_args.get("temperature", self.config.temperature)
+
         params = {
-            "model": model,
+            "model": selected_model,
             "messages": messages,
-            "temperature": self.config.temperature,
+            "temperature": temperature,
             "seed": random.randint(0, 10000),
         }
 
         try:
             completion = self.client.chat.completions.create(**params)
-            return completion.choices[0].message.content
+            return completion.choices[0].message.content, selected_model
         except Exception as e:
-            raise LLMJudgeException(f"API call failed: {e}")
+            raise LLMJudgeException(f"API call failed with model {selected_model}: {e}")
+
+    def _load_data_and_args(
+        self, data_url: str, evaluation_arg_url: str
+    ) -> tuple[str, dict]:
+        # Load test data
+        response = requests.get(data_url)
+        response.raise_for_status()
+        test_data = response.text
+
+        # Load evaluation arguments
+        eval_args = {}
+        if evaluation_arg_url:
+            try:
+                eval_response = requests.get(evaluation_arg_url)
+                eval_response.raise_for_status()
+                eval_args = json.loads(eval_response.text)
+                print(f"Loaded evaluation arguments: {eval_args}")
+            except Exception as e:
+                print(
+                    f"Warning: Failed to load evaluation arguments from {evaluation_arg_url}: {e}"
+                )
+
+        return test_data, eval_args
 
     def _load_jsonl_conversations(
         self,
@@ -240,25 +327,14 @@ class LLMJudgeValidationModule(BaseValidationModule):
         if self.hf_model is None:
             self._load_hf_model(model_name_or_path)
 
-        # Load test data (user inputs)
-        response = requests.get(data_url)
-        response.raise_for_status()
+        # Load data and arguments
+        test_data, eval_args = self._load_data_and_args(data_url, evaluation_arg_url)
 
-        # Load evaluation arguments if provided
-        eval_args = {}
-        if evaluation_arg_url:
-            try:
-                eval_response = requests.get(evaluation_arg_url)
-                eval_response.raise_for_status()
-                eval_args = json.loads(eval_response.text)
-                print(f"Loaded evaluation arguments: {eval_args}")
-            except Exception as e:
-                print(
-                    f"Warning: Failed to load evaluation arguments from {evaluation_arg_url}: {e}"
-                )
+        # Extract parameters from eval_args
+        max_gen_try = eval_args.get("max_gen_try", self.config.max_gen_try)
 
         generated_conversations = []
-        for line_num, line in enumerate(response.text.strip().split("\n"), 1):
+        for line_num, line in enumerate(test_data.strip().split("\n"), 1):
             if line.strip():
                 try:
                     json_data = json.loads(line)
@@ -307,8 +383,11 @@ class LLMJudgeValidationModule(BaseValidationModule):
                         )
                         continue
 
-                    # Generate assistant response using HuggingFace model
-                    try:
+                    # Generate assistant response with defined max_gen_try
+                    all_responses = []
+
+                    # Generate multiple responses
+                    for gen_try in range(max_gen_try):
                         if conversation_history:
                             assistant_response = self._generate_response(
                                 template_name=model_template,
@@ -326,21 +405,26 @@ class LLMJudgeValidationModule(BaseValidationModule):
                             # Create simple user-assistant pair
                             final_conversations = [
                                 {"role": "user", "content": user_input},
-                                {"role": "assistant", "content": assistant_response},
+                                {
+                                    "role": "assistant",
+                                    "content": assistant_response,
+                                },
                             ]
 
-                        conversation = {"conversations": final_conversations}
+                        # Create conversation structure for this generation
+                        conversation = {
+                            "conversations": final_conversations,
+                            "generation_index": gen_try,
+                            "total_generations": max_gen_try,
+                        }
+                        all_responses.append(conversation)
 
-                        generated_conversations.append(conversation)
                         print(
-                            f"Generated conversation {line_num}/{len(response.text.strip().split(chr(10)))}"
+                            f"Generated conversation {line_num}/{len(test_data.strip().split(chr(10)))}, generation {gen_try + 1}/{max_gen_try}"
                         )
 
-                    except Exception as e:
-                        print(
-                            f"Warning: Failed to generate response for line {line_num}: {e}"
-                        )
-                        continue
+                    # Add all generated responses for this input
+                    generated_conversations.extend(all_responses)
 
                 except json.JSONDecodeError:
                     print(f"Warning: Invalid JSON on line {line_num}, skipping")
@@ -421,7 +505,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         Returns:
             LLMJudgeMetrics: Metrics containing the averaged LLM evaluation score across all conversations
         """
-        _ = kwargs  # Acknowledge kwargs parameter to avoid warnings
+        _ = kwargs
 
         all_conversations = self._load_jsonl_conversations(
             data.model_name_or_path,
@@ -430,55 +514,100 @@ class LLMJudgeValidationModule(BaseValidationModule):
             data.evaluation_arg_url,
         )
 
+        # Load evaluation arguments to get max_eval_try
+        _, eval_args = self._load_data_and_args(
+            data.test_data_url, data.evaluation_arg_url
+        )
+        max_eval_try = eval_args.get("max_eval_try", self.config.max_eval_try)
+
         conversation_scores = []
         conversation_confidences = []
         all_conversation_reasoning = []
 
-        # Process each conversation
-        for conv_idx, conversation_data in enumerate(all_conversations):
-            conversation_context = self._format_single_conversation(conversation_data)
-            messages = self._construct_evaluation_prompt(
-                conversation_context, data.task_id
-            )
-
-            conv_scores = []
-            conv_confidences = []
-            conv_reasoning = []
-
-            for try_num in range(self.config.max_tries):
-                if not self.available_models:
-                    raise LLMJudgeException("No available models found")
-                selected_model = random.choice(self.available_models)
-                response = self._call_gpt(messages, selected_model)
-                parsed_result = self._parse_llm_response(response)
-
-                conv_scores.append(parsed_result["score"])
-                if parsed_result["confidence"] is not None:
-                    conv_confidences.append(parsed_result["confidence"])
-                if parsed_result["reasoning"]:
-                    conv_reasoning.append(
-                        f"Conv{conv_idx + 1}-Try{try_num + 1}({selected_model}): {parsed_result['reasoning']}"
-                    )
-
-            # Calculate average for single conversation
-            if conv_scores:
-                conv_avg_score = sum(conv_scores) / len(conv_scores)
-                conversation_scores.append(conv_avg_score)
-
-                if conv_confidences:
-                    conv_avg_confidence = sum(conv_confidences) / len(conv_confidences)
-                    conversation_confidences.append(conv_avg_confidence)
-
-                if conv_reasoning:
-                    all_conversation_reasoning.extend(conv_reasoning)
-
+        # Group conversations by original input (multiple generations of same input)
+        grouped_conversations = {}
+        for conv in all_conversations:
+            # Create a unique identifier for the original input
+            # Use conversation content excluding assistant response to group same inputs
+            conversations = conv.get("conversations", [])
+            if conversations and len(conversations) >= 2:
+                # Use user queries to identify the same input
+                user_parts = [
+                    msg["content"] for msg in conversations if msg.get("role") == "user"
+                ]
+                input_key = "|".join(user_parts)
             else:
-                print(
-                    f"Warning: No valid scores obtained for conversation {conv_idx + 1}"
+                input_key = f"single_{len(grouped_conversations)}"
+
+            if input_key not in grouped_conversations:
+                grouped_conversations[input_key] = []
+            grouped_conversations[input_key].append(conv)
+
+        # Process each group of conversations (multiple generations of same input)
+        for group_idx, (input_key, conv_group) in enumerate(
+            grouped_conversations.items()
+        ):
+
+            group_scores = []
+            group_confidences = []
+            group_reasoning = []
+
+            # Evaluate each generation in this group
+            for gen_idx, conversation_data in enumerate(conv_group):
+                conversation_context = self._format_single_conversation(
+                    conversation_data
+                )
+                messages = self._construct_evaluation_prompt(
+                    conversation_context, data.task_id
                 )
 
+                conv_scores = []
+                conv_confidences = []
+                conv_reasoning = []
+
+                # Multiple evaluation tries for each generation
+                for try_num in range(max_eval_try):
+                    response, selected_model = self._call_gpt(messages, eval_args)
+                    parsed_result = self._parse_llm_response(response)
+
+                    conv_scores.append(parsed_result["score"])
+                    if parsed_result["confidence"] is not None:
+                        conv_confidences.append(parsed_result["confidence"])
+                    if parsed_result["reasoning"]:
+                        conv_reasoning.append(
+                            f"Group{group_idx + 1}-Gen{gen_idx + 1}-Try{try_num + 1}({selected_model}): {parsed_result['reasoning']}"
+                        )
+
+                # Calculate average for this generation
+                if conv_scores:
+                    gen_avg_score = sum(conv_scores) / len(conv_scores)
+                    group_scores.append(gen_avg_score)
+
+                    if conv_confidences:
+                        gen_avg_confidence = sum(conv_confidences) / len(
+                            conv_confidences
+                        )
+                        group_confidences.append(gen_avg_confidence)
+
+                    if conv_reasoning:
+                        group_reasoning.extend(conv_reasoning)
+
+            # Calculate average across all generations in this group
+            if group_scores:
+                group_avg_score = sum(group_scores) / len(group_scores)
+                conversation_scores.append(group_avg_score)
+
+                if group_confidences:
+                    group_avg_confidence = sum(group_confidences) / len(
+                        group_confidences
+                    )
+                    conversation_confidences.append(group_avg_confidence)
+
+                if group_reasoning:
+                    all_conversation_reasoning.extend(group_reasoning)
+
         # Calculate overall averages across all conversations
-        overall_avg_score = sum(conversation_scores) / len(conversation_scores)
+        raw_avg_score = sum(conversation_scores) / len(conversation_scores)
         overall_avg_confidence = (
             sum(conversation_confidences) / len(conversation_confidences)
             if conversation_confidences
@@ -490,9 +619,9 @@ class LLMJudgeValidationModule(BaseValidationModule):
             else None
         )
 
-        print(
-            f"Overall average score across {len(conversation_scores)} conversations: {overall_avg_score:.2f}"
-        )
+        # Normalize the final score to (0, 1) range
+        overall_avg_score = self._normalize_score(raw_avg_score)
+        print(f"Overall normalized score (0-1 range): {overall_avg_score:.4f}")
 
         return LLMJudgeMetrics(
             score=overall_avg_score,
@@ -512,7 +641,6 @@ class LLMJudgeValidationModule(BaseValidationModule):
         # Clean up HuggingFace model resources
         if self.hf_model is not None:
             try:
-                # Move model to CPU and clear CUDA cache if using GPU
                 if torch.cuda.is_available():
                     self.hf_model.cpu()
                     torch.cuda.empty_cache()
