@@ -80,7 +80,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             )
 
         except Exception as e:
-            raise LLMJudgeException(f"Failed to initialize OpenAI client: {e}")
+            raise LLMJudgeException(f"Failed to initialize OpenAI client: {e}") from e
 
     def _fetch_available_models(self):
         try:
@@ -92,6 +92,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             print(
                 f"Warning: Failed to fetch models from API ({e}), using fallback models"
             )
+            self.available_models = ["gpt-4o"]
 
     def _load_hf_model(self, model_name_or_path: str):
         try:
@@ -112,7 +113,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         except Exception as e:
             raise LLMJudgeException(
                 f"Failed to load HuggingFace model {model_name_or_path}: {e}"
-            )
+            ) from e
 
     def _generate_response(
         self,
@@ -167,42 +168,43 @@ class LLMJudgeValidationModule(BaseValidationModule):
             conversation_format = "".join(conversation_parts)
 
             # Tokenize input
-            inputs = self.hf_tokenizer.encode(conversation_format, return_tensors="pt")
-
+            # Tokenize input
+            enc = self.hf_tokenizer(
+                conversation_format,
+                return_tensors="pt",
+                add_special_tokens=True,
+            )
             if torch.cuda.is_available():
-                inputs = inputs.cuda()
+                enc = {k: v.cuda() for k, v in enc.items()}
 
             # Generate response
             with torch.no_grad():
                 outputs = self.hf_model.generate(
-                    inputs,
-                    max_length=inputs.shape[1] + max_length,
+                    **enc,
+                    max_new_tokens=max_length,
                     num_return_sequences=1,
-                    temperature=0.7,
+                    temperature=self.config.temperature,
                     do_sample=True,
                     pad_token_id=self.hf_tokenizer.eos_token_id,
                     eos_token_id=self.hf_tokenizer.eos_token_id,
                 )
 
-            # Decode the generated response
-            full_response = self.hf_tokenizer.decode(
-                outputs[0], skip_special_tokens=True
-            )
-            # Extract only the assistant's response
-            if len(full_response) > len(conversation_format):
-                assistant_response = full_response[len(conversation_format) :].strip()
+            # Decode only the newly generated tokens
+            input_len = enc["input_ids"].shape[1]
+            generated_ids = outputs[0][input_len:]
+            assistant_response = self.hf_tokenizer.decode(
+                generated_ids, skip_special_tokens=True
+            ).strip()
 
-                if template.stop_word and template.stop_word in assistant_response:
-                    assistant_response = assistant_response.split(template.stop_word)[
-                        0
-                    ].strip()
+            if template.stop_word and template.stop_word in assistant_response:
+                assistant_response = assistant_response.split(template.stop_word)[
+                    0
+                ].strip()
 
-                return assistant_response
-            else:
-                return ""
+            return assistant_response
 
         except Exception as e:
-            raise LLMJudgeException(f"Failed to generate response: {e}")
+            raise LLMJudgeException(f"Failed to generate response: {e}") from e
 
     def _select_eval_model(self, eval_args: dict) -> str:
         """
