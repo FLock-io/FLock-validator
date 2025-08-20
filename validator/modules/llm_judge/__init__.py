@@ -121,6 +121,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         template_name: str = None,
         max_length: int = 512,
         conversation_history: List[Dict[str, str]] = None,
+        system_text: str = None,
     ) -> str:
         if self.hf_model is None or self.hf_tokenizer is None:
             raise LLMJudgeException("HuggingFace model not loaded")
@@ -134,9 +135,16 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
             conversation_parts = []
 
-            if template.system_format and template.system:
-                system_text = template.system_format.format(content=template.system)
-                conversation_parts.append(system_text)
+            # Use provided system_text or fall back to template default
+            if template.system_format:
+                system_content = (
+                    system_text if system_text else "You are a helpful assistant."
+                )
+                if system_content:
+                    formatted_system = template.system_format.format(
+                        content=system_content
+                    )
+                    conversation_parts.append(formatted_system)
 
             # multi-turn conversation or single user input
             if conversation_history:
@@ -341,6 +349,9 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 try:
                     json_data = json.loads(line)
 
+                    # Extract system information if available
+                    system_text = json_data.get("system", None)
+
                     # Extract conversation history for multi-turn support
                     conversation_history = None
                     user_input = None
@@ -359,22 +370,33 @@ class LLMJudgeValidationModule(BaseValidationModule):
                                     )
 
                             if valid_conversations:
-                                # Check if last message is from user (incomplete conversation)
-                                last_msg = valid_conversations[-1]
-                                if last_msg["role"] == "user":
-                                    # Incomplete conversation - use full history for generation
-                                    conversation_history = valid_conversations
-                                else:
-                                    # Complete conversation - extract last user message for new turn
-                                    user_messages = [
-                                        msg["content"]
-                                        for msg in valid_conversations
-                                        if msg["role"] == "user"
+                                # Remove last assistant message if it exists
+                                conversation_to_process = valid_conversations.copy()
+
+                                # If last message is from assistant, remove it
+                                if (
+                                    conversation_to_process
+                                    and conversation_to_process[-1]["role"]
+                                    == "assistant"
+                                ):
+                                    conversation_to_process = conversation_to_process[
+                                        :-1
                                     ]
-                                    if user_messages:
-                                        user_input = user_messages[
-                                            -1
-                                        ]  # Use last user message
+
+                                # Now the last message should be from user
+                                if (
+                                    conversation_to_process
+                                    and conversation_to_process[-1]["role"] == "user"
+                                ):
+                                    # Extract the last user message
+                                    user_input = conversation_to_process[-1]["content"]
+
+                                    # Previous conversation history (everything except the last user message)
+                                    conversation_history = (
+                                        conversation_to_process[:-1]
+                                        if len(conversation_to_process) > 1
+                                        else None
+                                    )
 
                     if not conversation_history and not user_input:
                         user_input = json_data.get("user", "").strip()
@@ -394,6 +416,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                             assistant_response = self._generate_response(
                                 template_name=model_template,
                                 conversation_history=conversation_history,
+                                system_text=system_text,
                             )
                             # Use full conversation history + new response
                             final_conversations = conversation_history + [
@@ -402,7 +425,9 @@ class LLMJudgeValidationModule(BaseValidationModule):
                         else:
                             # Single-turn conversation generation
                             assistant_response = self._generate_response(
-                                user_input=user_input, template_name=model_template
+                                user_input=user_input,
+                                template_name=model_template,
+                                system_text=system_text,
                             )
                             # Create simple user-assistant pair
                             final_conversations = [
