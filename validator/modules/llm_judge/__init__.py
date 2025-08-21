@@ -56,7 +56,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
     task_type = "llm_evaluation"
 
     def __init__(self, config: LLMJudgeConfig, **kwargs):
-        super().__init__()  # Use kwargs for parent class if needed
+        super().__init__(config, **kwargs)
         self.config = config
         self.client = None
         self.available_models = []
