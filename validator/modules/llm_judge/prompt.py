@@ -30,13 +30,15 @@ def list_registered_tasks() -> list[int]:
 
 @register(task_id=1)
 def default_evaluation_prompt(context: str):
-    evaluation_criteria = """You are a fiar judge, please evaluate the quality of an AI assistant's responses to user queries in a multi-turn conversation.
-    Your evaluation should be based on the following criteria:
+    evaluation_criteria = """The AI assistant has been provided with a conversation history (including prior user queries and assistant replies) as well as system-level instructions. It then generates a final response to the last user query.
+    
+    Your evaluation should focus only on the final response — do not consider the quality of previous turns — and should be based on the following five criteria. For each criterion, assign a score from 1 to 10, where 1 is the lowest and 10 is the highest:
     - Factuality: Whether the information provided in response is accurate, based on reliable facts and data.
     - User Satisfaction: Whether the responses meets the user's question and needs, and provides a comprehensive and appropriate answer to the question.
     - Logical Coherence: Whether the responses maintains overall consistency and logical coherence between different turns of the conversation, avoiding self-contradiction.
     - Richness: Whether the response includes rich info, depth, context, diversity to meet user needs and provide a comprehensive understanding.
     - Clarity: Whether the response is clear and understandable, and whether it uses concise language and structure so that user can easily understand it.
+    - Instruction-following: Whether the response adheres to any specific instructions or guidelines provided by the user or system.
     
     Scoring guidelines:
     - 1-3 points: Poor quality, fails to meet most criteria, contains significant errors or omissions.
@@ -44,8 +46,7 @@ def default_evaluation_prompt(context: str):
     - 7-9 points: Good quality, meets most criteria, has minor issues,
     - 10 points: Excellent quality, meets all criteria, no issues.
 
-    Multi-turn conversation context:
-    {context}
+    {conversation_context}
 
     Please provide a rationale for your score, your confidence of the score, and specifically addressing the relevance to the user's question in accordance with the criteria above.
     Your confidence of the score should be between 0 and 1, where 0 means you are very sure of the score, and 1 means you are very unsure of the score.
@@ -58,4 +59,4 @@ def default_evaluation_prompt(context: str):
     }}
     """
 
-    return evaluation_criteria.format(context=context)
+    return evaluation_criteria.format(conversation_context=context)

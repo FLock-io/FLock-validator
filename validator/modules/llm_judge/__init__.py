@@ -466,23 +466,36 @@ class LLMJudgeValidationModule(BaseValidationModule):
         return generated_conversations
 
     def _format_single_conversation(self, json_data: Dict[str, Any]) -> str:
-        conversation = json_data.get("conversations", json_data)
+        conversations = json_data.get("conversations", [])
+        system_instructions = json_data.get(
+            "system", "No system instructions provided."
+        )
 
-        # Convert conversation to formatted string
-        if isinstance(conversation, list):
-            formatted_conversation = ""
-            for i, message in enumerate(conversation):
-                if isinstance(message, dict):
-                    role = message.get("role", message.get("from", "unknown"))
-                    content = message.get("content", message.get("value", str(message)))
-                    formatted_conversation += f"**{role.capitalize()}:** {content}\n\n"
-                else:
-                    formatted_conversation += f"**Message {i+1}:** {str(message)}\n\n"
-            return formatted_conversation.strip()
-        elif isinstance(conversation, str):
-            return conversation
-        else:
-            return str(conversation)
+        # if not conversations or len(conversations) < 2:
+        #     return "Invalid conversation"
+
+        last_user = ""
+        last_assistant = ""
+        history_parts = []
+        # Get last user and assistant messages
+        last_user = (
+            conversations[-2].get("content", "") if len(conversations) >= 2 else ""
+        )
+        last_assistant = (
+            conversations[-1].get("content", "") if len(conversations) >= 1 else ""
+        )
+
+        # Build history
+        for i, msg in enumerate(conversations[:-2]):
+            role = msg.get("role", "").capitalize()
+            content = msg.get("content", "")
+            history_parts.append(f"**{role}:** {content}")
+
+        history_context = (
+            "\n\n".join(history_parts) if history_parts else "No previous history."
+        )
+
+        return f"""**System Instructions:**\n{system_instructions}\n\n**Conversation History:**\n{history_context}\n\n**Final User Query:**\n{last_user}\n\n**Assistant Response:**{last_assistant}"""
 
     def _construct_evaluation_prompt(
         self, conversation_context: str, task_id: int
