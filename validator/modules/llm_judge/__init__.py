@@ -16,6 +16,7 @@ from validator.modules.base import (
     BaseInputData,
     BaseMetrics,
 )
+from peft import PeftModel
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 from .template import template_dict
@@ -45,6 +46,7 @@ class LLMJudgeInputData(BaseInputData):
     task_id: int
     test_data_url: str
     evaluation_arg_url: str
+    base_model: Optional[str] = None  # For LoRA-adapted models
     evaluation_criteria: Optional[str] = None
 
 
@@ -94,17 +96,38 @@ class LLMJudgeValidationModule(BaseValidationModule):
             )
             self.available_models = ["gpt-4o"]
 
-    def _load_hf_model(self, model_name_or_path: str):
+    def _load_hf_model(self, model_name_or_path: str, base_model: str = ""):
         try:
-            self.hf_tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-            self.hf_model = AutoModelForCausalLM.from_pretrained(
-                model_name_or_path,
-                torch_dtype=(
-                    torch.float16 if torch.cuda.is_available() else torch.float32
-                ),
-                device_map="auto" if torch.cuda.is_available() else None,
-                trust_remote_code=True,
-            )
+            if base_model:
+                # Load LoRA-adapted model
+                self.hf_tokenizer = AutoTokenizer.from_pretrained(base_model)
+                base_hf_model = AutoModelForCausalLM.from_pretrained(
+                    base_model,
+                    torch_dtype=(
+                        torch.float16 if torch.cuda.is_available() else torch.float32
+                    ),
+                    device_map="auto" if torch.cuda.is_available() else None,
+                    trust_remote_code=True,
+                )
+                self.hf_model = PeftModel.from_pretrained(
+                    base_hf_model,
+                    model_name_or_path,
+                    torch_dtype=(
+                        torch.float16 if torch.cuda.is_available() else torch.float32
+                    ),
+                    device_map="auto" if torch.cuda.is_available() else None,
+                    trust_remote_code=True,
+                )
+            else:
+                self.hf_tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+                self.hf_model = AutoModelForCausalLM.from_pretrained(
+                    model_name_or_path,
+                    torch_dtype=(
+                        torch.float16 if torch.cuda.is_available() else torch.float32
+                    ),
+                    device_map="auto" if torch.cuda.is_available() else None,
+                    trust_remote_code=True,
+                )
 
             # Add padding token if it doesn't exist
             if self.hf_tokenizer.pad_token is None:
@@ -255,10 +278,8 @@ class LLMJudgeValidationModule(BaseValidationModule):
         # Normalize to [0, 1] range
         normalized = (score - min_score) / (max_score - min_score)
 
-        # Ensure the result is strictly in (0, 1) range, not [0, 1]
-        # Add small epsilon to avoid exact 0 or 1
-        epsilon = 1e-8
-        normalized = max(epsilon, min(1.0 - epsilon, normalized))
+        # epsilon = 1e-8
+        # normalized = max(epsilon, min(1.0 - epsilon, normalized))
 
         return normalized
 
@@ -320,6 +341,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         model_template: str,
         data_url: str,
         evaluation_arg_url: str,
+        base_model: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Load test data and generate conversations using HuggingFace model
@@ -335,7 +357,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         """
         # Load the HuggingFace model
         if self.hf_model is None:
-            self._load_hf_model(model_name_or_path)
+            self._load_hf_model(model_name_or_path, base_model or "")
 
         # Load data and arguments
         test_data, eval_args = self._load_data_and_args(data_url, evaluation_arg_url)
@@ -486,7 +508,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         )
 
         # Build history
-        for i, msg in enumerate(conversations[:-2]):
+        for msg in conversations[:-2]:
             role = msg.get("role", "").capitalize()
             content = msg.get("content", "")
             history_parts.append(f"**{role}:** {content}")
@@ -552,6 +574,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             data.model_template,
             data.test_data_url,
             data.evaluation_arg_url,
+            data.base_model,
         )
 
         # Load evaluation arguments to get max_eval_try

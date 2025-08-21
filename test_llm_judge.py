@@ -70,6 +70,7 @@ def test_llm_judge():
         task_id=1,
         test_data_url="https://mock.example.com/test_data.jsonl",
         evaluation_arg_url="https://mock.example.com/eval_args.json",
+        base_model=None,  # No LoRA adapter for this test
         evaluation_criteria="Test evaluation criteria",
     )
 

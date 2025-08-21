@@ -49,7 +49,7 @@ def default_evaluation_prompt(context: str):
     {conversation_context}
 
     Please provide a rationale for your score, your confidence of the score, and specifically addressing the relevance to the user's question in accordance with the criteria above.
-    Your confidence of the score should be between 0 and 1, where 0 means you are very sure of the score, and 1 means you are very unsure of the score.
+    Your confidence of the score should be between 0 and 1, where 1 means you are very sure of the score, and 0 means you are very unsure of the score.
 
     Your response should be in the following JSON format:
     {{
