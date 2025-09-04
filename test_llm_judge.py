@@ -35,7 +35,7 @@ def mock_requests_get(url: str):
         test_data_path = (
             Path(__file__).parent
             / "validator/modules/llm_judge/test_data"
-            / "final_validation_set.jsonl"
+            / "simple_test.jsonl"
         )
         content = load_local_file(test_data_path)
         return create_mock_response(content)
@@ -43,8 +43,9 @@ def mock_requests_get(url: str):
     elif "eval_args.json" in url:
         eval_args = {
             "eval_model_list": ["qwen235b"],
-            "temperature": 0.3,
-            "max_eval_try": 3,
+            "gen_temperature": 0.1,
+            "eval_temperature": 0.5,
+            "max_eval_try": 1,
             "max_gen_try": 1,
         }
         content = json.dumps(eval_args, indent=2)
@@ -60,13 +61,12 @@ def test_llm_judge():
         if not os.getenv(var):
             print(f"Warning: {var} not set. Set it before running the test.")
 
-    # Create configuration (will be overridden by eval_args)
-    config = LLMJudgeConfig(temperature=0.7, max_eval_try=3, max_gen_try=1)
+    # Create configuration
+    config = LLMJudgeConfig(gen_batch_size=1, eval_batch_size=1)
 
     # Create input data
     input_data = LLMJudgeInputData(
         model_name_or_path="microsoft/DialoGPT-medium",
-        model_template="default",
         task_id=1,
         test_data_url="https://mock.example.com/test_data.jsonl",
         evaluation_arg_url="https://mock.example.com/eval_args.json",

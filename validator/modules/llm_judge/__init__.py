@@ -5,6 +5,7 @@ import random
 import json
 import requests
 import httpx
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
 from typing import List, Optional, Dict, Any
 from .prompt import get_prompt
@@ -29,9 +30,8 @@ class LLMJudgeException(RecoverableException):
 
 
 class LLMJudgeConfig(BaseConfig):
-    temperature: float = 0.7
-    max_eval_try: int = 3
-    max_gen_try: int = 1  # Number of attempts to generate responses for each input
+    gen_batch_size = 1
+    eval_batch_size = 10
 
 
 class LLMJudgeMetrics(BaseMetrics):
@@ -42,7 +42,6 @@ class LLMJudgeMetrics(BaseMetrics):
 
 class LLMJudgeInputData(BaseInputData):
     model_name_or_path: str
-    model_template: str
     task_id: int
     test_data_url: str
     evaluation_arg_url: str
@@ -140,99 +139,51 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
     def _generate_response(
         self,
-        user_input: str = None,
-        template_name: str = None,
-        max_length: int = 512,
-        conversation_history: List[Dict[str, str]] = None,
-        system_text: str = None,
+        user_input: list = list[
+            list[dict[str, str]]
+        ],  # list of conversations, each conversation is a list of messages
+        max_length: int = 7000,
+        batch_size: int = 1,
+        eval_args: dict = None,
     ) -> str:
         if self.hf_model is None or self.hf_tokenizer is None:
             raise LLMJudgeException("HuggingFace model not loaded")
 
         try:
-            if template_name not in template_dict:
-                logger.warning(f"Template {template_name} not found, using default")
-                template_name = "default"
-
-            template = template_dict[template_name]
-
-            conversation_parts = []
-
-            # Use provided system_text or fall back to template default
-            if template.system_format:
-                system_content = (
-                    system_text if system_text else "You are a helpful assistant."
-                )
-                if system_content:
-                    formatted_system = template.system_format.format(
-                        content=system_content
+            results = []
+            for i in range(0, len(user_input), batch_size):
+                batch_conversations = user_input[i : i + batch_size]
+                batch_conversation_templates = [
+                    self.hf_tokenizer.apply_chat_template(
+                        conversation, tokenize=False, add_generation_token=True
                     )
-                    conversation_parts.append(formatted_system)
-
-            # multi-turn conversation or single user input
-            if conversation_history:
-                # Multi-turn conversation: format each message according to template
-                for msg in conversation_history:
-                    if msg["role"] == "user":
-                        user_text = template.user_format.format(
-                            content=msg["content"],
-                            stop_token=self.hf_tokenizer.eos_token,
-                        )
-                        conversation_parts.append(user_text)
-                    elif msg["role"] == "assistant":
-                        assistant_text = template.assistant_format.format(
-                            content=msg["content"],
-                            stop_token=self.hf_tokenizer.eos_token,
-                        )
-                        conversation_parts.append(assistant_text)
-            elif user_input:
-                # Single user input
-                user_text = template.user_format.format(
-                    content=user_input, stop_token=self.hf_tokenizer.eos_token
-                )
-                conversation_parts.append(user_text)
-            else:
-                raise LLMJudgeException(
-                    "Either user_input or conversation_history must be provided"
-                )
-
-            conversation_format = "".join(conversation_parts)
-
-            # Tokenize input
-            # Tokenize input
-            enc = self.hf_tokenizer(
-                conversation_format,
-                return_tensors="pt",
-                add_special_tokens=True,
-            )
-            if torch.cuda.is_available():
-                enc = {k: v.cuda() for k, v in enc.items()}
-
-            # Generate response
-            with torch.no_grad():
+                    for conversation in batch_conversations
+                ]
+                model_inputs = self.hf_tokenizer(
+                    batch_conversation_templates,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    padding_side="left",
+                ).to(self.hf_model.device)
                 outputs = self.hf_model.generate(
-                    **enc,
+                    **model_inputs,
                     max_new_tokens=max_length,
-                    num_return_sequences=1,
-                    temperature=self.config.temperature,
+                    temperature=(
+                        eval_args.get("gen_temperature", 0.7) if eval_args else 0.7
+                    ),
                     do_sample=True,
                     pad_token_id=self.hf_tokenizer.eos_token_id,
                     eos_token_id=self.hf_tokenizer.eos_token_id,
                 )
+                for output in outputs:
+                    generated_ids = output[model_inputs["input_ids"].shape[1] :]
+                    assistant_response = self.hf_tokenizer.decode(
+                        generated_ids, skip_special_tokens=True
+                    ).strip()
+                    results.append(assistant_response)
 
-            # Decode only the newly generated tokens
-            input_len = enc["input_ids"].shape[1]
-            generated_ids = outputs[0][input_len:]
-            assistant_response = self.hf_tokenizer.decode(
-                generated_ids, skip_special_tokens=True
-            ).strip()
-
-            if template.stop_word and template.stop_word in assistant_response:
-                assistant_response = assistant_response.split(template.stop_word)[
-                    0
-                ].strip()
-
-            return assistant_response
+            return results
 
         except Exception as e:
             raise LLMJudgeException(f"Failed to generate response: {e}") from e
@@ -296,8 +247,12 @@ class LLMJudgeValidationModule(BaseValidationModule):
         Returns:
             Tuple of (API response content, selected model name)
         """
-        selected_model = self._select_eval_model(eval_args)
-        temperature = eval_args.get("temperature", self.config.temperature)
+        # Check if a specific model is requested
+        if "selected_model" in eval_args:
+            selected_model = eval_args["selected_model"]
+        else:
+            selected_model = self._select_eval_model(eval_args)
+        temperature = eval_args.get("temperature", 0.3)  # Default eval temperature
 
         params = {
             "model": selected_model,
@@ -338,7 +293,6 @@ class LLMJudgeValidationModule(BaseValidationModule):
     def _load_jsonl_conversations(
         self,
         model_name_or_path: str,
-        model_template: str,
         data_url: str,
         evaluation_arg_url: str,
         base_model: Optional[str] = None,
@@ -363,9 +317,10 @@ class LLMJudgeValidationModule(BaseValidationModule):
         test_data, eval_args = self._load_data_and_args(data_url, evaluation_arg_url)
 
         # Extract parameters from eval_args
-        max_gen_try = eval_args.get("max_gen_try", self.config.max_gen_try)
+        max_gen_try = eval_args.get("max_gen_try", 1)  # Default max generation tries
 
-        generated_conversations = []
+        # Parse all input conversations first
+        input_conversations = []
         for line_num, line in enumerate(test_data.strip().split("\n"), 1):
             if line.strip():
                 try:
@@ -375,109 +330,96 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     system_text = json_data.get("system", None)
 
                     # Extract conversation history for multi-turn support
-                    conversation_history = None
-                    user_input = None
+                    conversation_to_process = []
 
                     if "conversations" in json_data:
                         conversations = json_data["conversations"]
                         if isinstance(conversations, list) and conversations:
                             # Filter valid messages
-                            valid_conversations = []
                             for msg in conversations:
                                 role = msg.get("role", "")
                                 content = msg.get("content", "").strip()
                                 if role in ["user", "assistant"] and content:
-                                    valid_conversations.append(
+                                    conversation_to_process.append(
                                         {"role": role, "content": content}
                                     )
 
-                            if valid_conversations:
-                                # Remove last assistant message if it exists
-                                conversation_to_process = valid_conversations.copy()
+                            # Remove last assistant message if it exists
+                            if (
+                                conversation_to_process
+                                and conversation_to_process[-1]["role"] == "assistant"
+                            ):
+                                conversation_to_process = conversation_to_process[:-1]
 
-                                # If last message is from assistant, remove it
-                                if (
-                                    conversation_to_process
-                                    and conversation_to_process[-1]["role"]
-                                    == "assistant"
-                                ):
-                                    conversation_to_process = conversation_to_process[
-                                        :-1
-                                    ]
-
-                                # Now the last message should be from user
-                                if (
-                                    conversation_to_process
-                                    and conversation_to_process[-1]["role"] == "user"
-                                ):
-                                    # Extract the last user message
-                                    user_input = conversation_to_process[-1]["content"]
-
-                                    # Previous conversation history (everything except the last user message)
-                                    conversation_history = (
-                                        conversation_to_process[:-1]
-                                        if len(conversation_to_process) > 1
-                                        else None
-                                    )
-
-                    if not conversation_history and not user_input:
+                    # If no conversations found, try to extract from "user" field
+                    if not conversation_to_process:
                         user_input = json_data.get("user", "").strip()
+                        if user_input:
+                            conversation_to_process = [
+                                {"role": "user", "content": user_input}
+                            ]
 
-                    if not conversation_history and not user_input:
+                    if not conversation_to_process:
                         print(
                             f"Warning: No user input found in line {line_num}, skipping"
                         )
                         continue
 
-                    # Generate assistant response with defined max_gen_try
-                    all_responses = []
-
-                    # Generate multiple responses
-                    for gen_try in range(max_gen_try):
-                        if conversation_history:
-                            assistant_response = self._generate_response(
-                                template_name=model_template,
-                                conversation_history=conversation_history,
-                                system_text=system_text,
-                            )
-                            # Use full conversation history + new response
-                            final_conversations = conversation_history + [
-                                {"role": "assistant", "content": assistant_response}
-                            ]
-                        else:
-                            # Single-turn conversation generation
-                            assistant_response = self._generate_response(
-                                user_input=user_input,
-                                template_name=model_template,
-                                system_text=system_text,
-                            )
-                            # Create simple user-assistant pair
-                            final_conversations = [
-                                {"role": "user", "content": user_input},
-                                {
-                                    "role": "assistant",
-                                    "content": assistant_response,
-                                },
-                            ]
-
-                        # Create conversation structure for this generation
-                        conversation = {
-                            "conversations": final_conversations,
-                            "generation_index": gen_try,
-                            "total_generations": max_gen_try,
-                        }
-                        all_responses.append(conversation)
-
-                        print(
-                            f"Generated conversation {line_num}/{len(test_data.strip().split(chr(10)))}, generation {gen_try + 1}/{max_gen_try}"
+                    # Add system message if present
+                    if system_text:
+                        conversation_to_process.insert(
+                            0, {"role": "system", "content": system_text}
                         )
 
-                    # Add all generated responses for this input
-                    generated_conversations.extend(all_responses)
+                    input_conversations.append(
+                        {
+                            "conversation": conversation_to_process,
+                            "line_num": line_num,
+                        }
+                    )
 
                 except json.JSONDecodeError:
                     print(f"Warning: Invalid JSON on line {line_num}, skipping")
                     continue
+
+        if not input_conversations:
+            raise LLMJudgeException("No valid conversations were found")
+
+        generated_conversations = []
+
+        # Generate responses for each input conversation
+        for gen_try in range(max_gen_try):
+            # Prepare batch of conversations for generation
+            batch_conversations = [item["conversation"] for item in input_conversations]
+
+            # Generate responses using batch processing
+            batch_size = eval_args.get("batch_size", self.config.gen_batch_size)
+            assistant_responses = self._generate_response(
+                user_input=batch_conversations,
+                batch_size=batch_size,
+                eval_args=eval_args,
+            )
+
+            # Create conversation structures for this generation
+            for input_item, assistant_response in zip(
+                input_conversations, assistant_responses
+            ):
+                # Create final conversation with assistant response
+                final_conversations = input_item["conversation"] + [
+                    {"role": "assistant", "content": assistant_response}
+                ]
+
+                # Create conversation structure for this generation
+                conversation = {
+                    "conversations": final_conversations,
+                    "generation_index": gen_try,
+                    "total_generations": max_gen_try,
+                }
+                generated_conversations.append(conversation)
+
+                print(
+                    f"Generated conversation {input_item['line_num']}/{len(input_conversations)}, generation {gen_try + 1}/{max_gen_try}"
+                )
 
         if not generated_conversations:
             raise LLMJudgeException("No valid conversations were generated")
@@ -487,37 +429,28 @@ class LLMJudgeValidationModule(BaseValidationModule):
         )
         return generated_conversations
 
-    def _format_single_conversation(self, json_data: Dict[str, Any]) -> str:
-        conversations = json_data.get("conversations", [])
-        system_instructions = json_data.get(
-            "system", "No system instructions provided."
-        )
+    def _format_single_conversation(self, conversation_data: Dict[str, Any]) -> str:
+        """Format a single conversation for evaluation"""
+        conversations = conversation_data.get("conversations", [])
 
-        # if not conversations or len(conversations) < 2:
-        #     return "Invalid conversation"
+        if not conversations:
+            return "No conversation found"
 
-        last_user = ""
-        last_assistant = ""
-        history_parts = []
-        # Get last user and assistant messages
-        last_user = (
-            conversations[-2].get("content", "") if len(conversations) >= 2 else ""
-        )
-        last_assistant = (
-            conversations[-1].get("content", "") if len(conversations) >= 1 else ""
-        )
+        # Format the conversation
+        formatted_parts = []
 
-        # Build history
-        for msg in conversations[:-2]:
-            role = msg.get("role", "").capitalize()
+        for msg in conversations:
+            role = msg.get("role", "")
             content = msg.get("content", "")
-            history_parts.append(f"**{role}:** {content}")
 
-        history_context = (
-            "\n\n".join(history_parts) if history_parts else "No previous history."
-        )
+            if role == "system":
+                formatted_parts.append(f"System: {content}")
+            elif role == "user":
+                formatted_parts.append(f"User: {content}")
+            elif role == "assistant":
+                formatted_parts.append(f"Assistant: {content}")
 
-        return f"""**System Instructions:**\n{system_instructions}\n\n**Conversation History:**\n{history_context}\n\n**Final User Query:**\n{last_user}\n\n**Assistant Response:**{last_assistant}"""
+        return "\n\n".join(formatted_parts)
 
     def _construct_evaluation_prompt(
         self, conversation_context: str, task_id: int
@@ -536,7 +469,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         ]
 
     def _parse_llm_response(self, response: str) -> Dict[str, Any]:
-        result = {"score": 0.0, "confidence": 0, "reasoning": None}
+        result = {"score": 5.0, "confidence": 0, "reasoning": None}
 
         try:
             json_match = re.search(r'\{[^}]*"score"[^}]*\}', response, re.DOTALL)
@@ -556,36 +489,104 @@ class LLMJudgeValidationModule(BaseValidationModule):
             print(f"Failed to parse JSON response: {e}")
             return result
 
+    def _evaluate_single_conversation(
+        self,
+        conversation_data: Dict[str, Any],
+        task_id: int,
+        eval_args: dict,
+        max_eval_try: int,
+        group_idx: int,
+        gen_idx: int,
+    ) -> Dict[str, Any]:
+        """
+        Evaluate a single conversation and return scores, confidences, and reasoning
+        Uses all available models for evaluation, each model runs max_eval_try times
+        """
+        conversation_context = self._format_single_conversation(conversation_data)
+        messages = self._construct_evaluation_prompt(conversation_context, task_id)
+
+        conv_scores = []
+        conv_confidences = []
+        conv_reasoning = []
+
+        # Get available models for evaluation
+        eval_model_list = eval_args.get("eval_model_list", [])
+        available_eval_models = [
+            model for model in eval_model_list if model in self.available_models
+        ]
+        
+        # If no models specified or available, use all available models
+        if not available_eval_models:
+            available_eval_models = self.available_models
+        
+        # Evaluate with each model for max_eval_try times
+        for model_idx, model_name in enumerate(available_eval_models):
+            for try_num in range(max_eval_try):
+                # Create modified eval_args to specify the exact model to use
+                model_eval_args = eval_args.copy()
+                model_eval_args["selected_model"] = model_name
+                
+                response, selected_model = self._call_gpt(messages, model_eval_args)
+                parsed_result = self._parse_llm_response(response)
+
+                conv_scores.append(parsed_result["score"])
+                if parsed_result["confidence"] is not None:
+                    conv_confidences.append(parsed_result["confidence"])
+                if parsed_result["reasoning"]:
+                    conv_reasoning.append(
+                        f"Group{group_idx + 1}-Gen{gen_idx + 1}-Model{model_idx + 1}({selected_model})-Try{try_num + 1}: {parsed_result['reasoning']}"
+                    )
+
+        return {
+            "scores": conv_scores,
+            "confidences": conv_confidences,
+            "reasoning": conv_reasoning,
+        }
+
     def validate(self, data: LLMJudgeInputData, **kwargs) -> LLMJudgeMetrics:
         """
         Validate using LLM as a judge with multiple tries and random model selection
+        Uses two-stage approach: first generate all responses, then parallel evaluation
 
         Args:
             data: Input data containing evaluation prompt and context
-            **kwargs: Additional arguments (currently unused)
+            **kwargs: Additional arguments
 
         Returns:
             LLMJudgeMetrics: Metrics containing the averaged LLM evaluation score across all conversations
         """
         _ = kwargs
 
+        # Stage 1: Generate all responses
+        print("Stage 1: Generating all responses...")
         all_conversations = self._load_jsonl_conversations(
             data.model_name_or_path,
-            data.model_template,
             data.test_data_url,
             data.evaluation_arg_url,
             data.base_model,
         )
 
-        # Load evaluation arguments to get max_eval_try
+        # Load evaluation arguments
         _, eval_args = self._load_data_and_args(
             data.test_data_url, data.evaluation_arg_url
         )
-        max_eval_try = eval_args.get("max_eval_try", self.config.max_eval_try)
+        max_eval_try = eval_args.get("max_eval_try", 3)  # Default max evaluation tries
+        eval_batch_size = self.config.eval_batch_size
+        
+        # Calculate total evaluation calls
+        eval_model_list = eval_args.get("eval_model_list", [])
+        available_eval_models = [
+            model for model in eval_model_list if model in self.available_models
+        ]
+        if not available_eval_models:
+            available_eval_models = self.available_models
+        
+        total_eval_calls = len(all_conversations) * len(available_eval_models) * max_eval_try
 
-        conversation_scores = []
-        conversation_confidences = []
-        all_conversation_reasoning = []
+        print(
+            f"Stage 2: Evaluating {len(all_conversations)} conversations with {len(available_eval_models)} models, "
+            f"{max_eval_try} tries each = {total_eval_calls} total evaluations using {eval_batch_size} parallel workers..."
+        )
 
         # Group conversations by original input (multiple generations of same input)
         grouped_conversations = {}
@@ -606,54 +607,81 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 grouped_conversations[input_key] = []
             grouped_conversations[input_key].append(conv)
 
-        # Process each group of conversations (multiple generations of same input)
+        # Stage 2: Parallel evaluation of all conversations
+        conversation_scores = []
+        conversation_confidences = []
+        all_conversation_reasoning = []
+
+        # Prepare all evaluation tasks
+        evaluation_tasks = []
         for group_idx, (input_key, conv_group) in enumerate(
             grouped_conversations.items()
         ):
+            for gen_idx, conversation_data in enumerate(conv_group):
+                evaluation_tasks.append(
+                    (
+                        conversation_data,
+                        data.task_id,
+                        eval_args,
+                        max_eval_try,
+                        group_idx,
+                        gen_idx,
+                    )
+                )
 
+        # Execute evaluations in parallel
+        with ThreadPoolExecutor(max_workers=eval_batch_size) as executor:
+            # Submit all tasks
+            future_to_task = {
+                executor.submit(self._evaluate_single_conversation, *task): task
+                for task in evaluation_tasks
+            }
+
+            # Collect results
+            evaluation_results = []
+            for future in as_completed(future_to_task):
+                try:
+                    result = future.result()
+                    evaluation_results.append(result)
+                except Exception as e:
+                    print(f"Evaluation task failed: {e}")
+                    # Add default result for failed tasks
+                    evaluation_results.append(
+                        {
+                            "scores": [5.0],
+                            "confidences": [0.5],
+                            "reasoning": ["Evaluation failed"],
+                        }
+                    )
+
+        # Process results and group them back by original input
+        result_index = 0
+        for group_idx, (input_key, conv_group) in enumerate(
+            grouped_conversations.items()
+        ):
             group_scores = []
             group_confidences = []
             group_reasoning = []
 
-            # Evaluate each generation in this group
-            for gen_idx, conversation_data in enumerate(conv_group):
-                conversation_context = self._format_single_conversation(
-                    conversation_data
-                )
-                messages = self._construct_evaluation_prompt(
-                    conversation_context, data.task_id
-                )
+            # Process results for this group
+            for gen_idx in range(len(conv_group)):
+                if result_index < len(evaluation_results):
+                    result = evaluation_results[result_index]
+                    result_index += 1
 
-                conv_scores = []
-                conv_confidences = []
-                conv_reasoning = []
+                    # Calculate average for this generation
+                    if result["scores"]:
+                        gen_avg_score = sum(result["scores"]) / len(result["scores"])
+                        group_scores.append(gen_avg_score)
 
-                # Multiple evaluation tries for each generation
-                for try_num in range(max_eval_try):
-                    response, selected_model = self._call_gpt(messages, eval_args)
-                    parsed_result = self._parse_llm_response(response)
-
-                    conv_scores.append(parsed_result["score"])
-                    if parsed_result["confidence"] is not None:
-                        conv_confidences.append(parsed_result["confidence"])
-                    if parsed_result["reasoning"]:
-                        conv_reasoning.append(
-                            f"Group{group_idx + 1}-Gen{gen_idx + 1}-Try{try_num + 1}({selected_model}): {parsed_result['reasoning']}"
-                        )
-
-                # Calculate average for this generation
-                if conv_scores:
-                    gen_avg_score = sum(conv_scores) / len(conv_scores)
-                    group_scores.append(gen_avg_score)
-
-                    if conv_confidences:
-                        gen_avg_confidence = sum(conv_confidences) / len(
-                            conv_confidences
+                    if result["confidences"]:
+                        gen_avg_confidence = sum(result["confidences"]) / len(
+                            result["confidences"]
                         )
                         group_confidences.append(gen_avg_confidence)
 
-                    if conv_reasoning:
-                        group_reasoning.extend(conv_reasoning)
+                    if result["reasoning"]:
+                        group_reasoning.extend(result["reasoning"])
 
             # Calculate average across all generations in this group
             if group_scores:
