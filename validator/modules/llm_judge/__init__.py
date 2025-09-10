@@ -21,6 +21,7 @@ from peft import PeftModel
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 from loguru import logger
+from .template import template_dict
 
 
 class LLMJudgeException(RecoverableException):
@@ -44,6 +45,7 @@ class LLMJudgeInputData(BaseInputData):
     task_id: int
     test_data_url: str
     evaluation_arg_url: str
+    model_template: Optional[str] = "default"
     base_model: Optional[str] = None  # For LoRA-adapted models
     evaluation_criteria: Optional[str] = None
 
@@ -152,11 +154,61 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 f"Failed to load HuggingFace model {model_name_or_path}: {e}"
             ) from e
 
+    def _construct_conversation_template(
+        self, conversation: List[Dict[str, str]], model_template: str
+    ) -> str:
+        try:
+            if model_template not in template_dict:
+                logger.warning(f"Template {model_template} not found, using default")
+                model_template = "default"
+
+            template = template_dict[model_template]
+
+            conversation_parts = []
+
+            # Use provided system_text or fall back to template default
+            if template.system_format:
+                system_prompt = (
+                    conversation["system"] if "system" in conversation else None
+                )
+                system_content = (
+                    system_prompt if system_prompt else "You are a helpful assistant."
+                )
+                if system_content:
+                    formatted_system = template.system_format.format(
+                        content=system_content
+                    )
+                    conversation_parts.append(formatted_system)
+
+                # Multi-turn conversation: format each message according to template
+                for msg in conversation["conversations"]:
+                    if msg["role"] == "user":
+                        user_text = template.user_format.format(
+                            content=msg["content"],
+                            stop_token=self.hf_tokenizer.eos_token,
+                        )
+                        conversation_parts.append(user_text)
+                    elif msg["role"] == "assistant":
+                        assistant_text = template.assistant_format.format(
+                            content=msg["content"],
+                            stop_token=self.hf_tokenizer.eos_token,
+                        )
+                        conversation_parts.append(assistant_text)
+
+            conversation_format = "".join(conversation_parts)
+        except Exception as e:
+            raise LLMJudgeException(
+                f"Failed to construct conversation template: {e}"
+            ) from e
+
+        return conversation_format
+
     def _generate_response(
         self,
         user_input: list = list[
             list[dict[str, str]]
         ],  # list of conversations, each conversation is a list of messages
+        model_template: str = "default",
         max_length: int = 2048,
         batch_size: int = 1,
         eval_args: dict = None,
@@ -172,36 +224,17 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 # Apply chat template with fallback
                 batch_conversation_templates = []
                 for conversation in batch_conversations:
-                    try:
-                        template = self.hf_tokenizer.apply_chat_template(
-                            conversation, tokenize=False, add_generation_token=True
-                        )
-                        batch_conversation_templates.append(template)
-                    except Exception as e:
-                        fallback = ""
-                        for msg in conversation:
-                            role = msg.get("role", "")
-                            content = msg.get("content", "")
-                            if role == "system":
-                                fallback += f"<|im_start|>system\n{content}<|im_end|>\n"
-                            elif role == "user":
-                                fallback += f"<|im_start|>user\n{content}<|im_end|>\n"
-                            elif role == "assistant":
-                                fallback += (
-                                    f"<|im_start|>assistant\n{content}<|im_end|>\n"
-                                )
-                        # Add assistant start token for generation
-                        fallback += "<|im_start|>assistant\n"
-                        batch_conversation_templates.append(fallback)
+                    template = self._construct_conversation_template(
+                        conversation, model_template=model_template
+                    )
+
+                    batch_conversation_templates.append(template)
 
                 # Simple tokenization
                 model_inputs = self.hf_tokenizer(
                     batch_conversation_templates,
                     return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=max_length,
-                    padding_side="left",
+                    add_special_tokens=True,
                 )
 
                 # Move to device if available
@@ -214,14 +247,11 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 with torch.no_grad():
                     outputs = self.hf_model.generate(
                         **model_inputs,
-                        max_new_tokens=min(max_length, 2048),
-                        min_new_tokens=5,
+                        max_new_tokens=max_length,
                         temperature=eval_args.get("gen_temperature", 0.7),
                         do_sample=True,
-                        top_p=0.9,
                         pad_token_id=self.hf_tokenizer.eos_token_id,
                         eos_token_id=self.hf_tokenizer.eos_token_id,
-                        repetition_penalty=1.1,
                     )
 
                 # Decode responses
@@ -236,6 +266,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     ).strip()
 
                     results.append(assistant_response)
+                    # print("assistant_response:", assistant_response)
                 print(f"Generated batch of size {i+batch_size}/{len(user_input)}")
 
             return results
@@ -348,6 +379,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
     def _load_jsonl_conversations(
         self,
         model_name_or_path: str,
+        model_template: str,
         data_url: str,
         evaluation_arg_url: str,
         base_model: Optional[str] = None,
@@ -383,6 +415,10 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
                     # Extract system information if available
                     system_text = json_data.get("system", None)
+                    input_conversations_data = {
+                        "system": system_text,
+                        "conversations": [],
+                    }
 
                     # Extract conversation history for multi-turn support
                     conversation_to_process = []
@@ -420,15 +456,11 @@ class LLMJudgeValidationModule(BaseValidationModule):
                         )
                         continue
 
-                    # Add system message if present
-                    if system_text:
-                        conversation_to_process.insert(
-                            0, {"role": "system", "content": system_text}
-                        )
+                    input_conversations_data["conversations"] = conversation_to_process
 
                     input_conversations.append(
                         {
-                            "conversation": conversation_to_process,
+                            "conversation": input_conversations_data,
                             "line_num": line_num,
                         }
                     )
@@ -451,6 +483,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             batch_size = eval_args.get("batch_size", self.config.gen_batch_size)
             assistant_responses = self._generate_response(
                 user_input=batch_conversations,
+                model_template=model_template,
                 batch_size=batch_size,
                 eval_args=eval_args,
             )
@@ -460,9 +493,16 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 input_conversations, assistant_responses
             ):
                 # Create final conversation with assistant response
-                final_conversations = input_item["conversation"] + [
-                    {"role": "assistant", "content": assistant_response}
-                ]
+                final_conversations = (
+                    [
+                        {
+                            "role": "system",
+                            "content": input_item["conversation"]["system"],
+                        }
+                    ]
+                    + input_item["conversation"]["conversations"]
+                    + [{"role": "assistant", "content": assistant_response}]
+                )
 
                 # Create conversation structure for this generation
                 conversation = {
@@ -543,12 +583,10 @@ class LLMJudgeValidationModule(BaseValidationModule):
         task_id: int,
         eval_args: dict,
         max_eval_try: int,
-        group_idx: int,
-        gen_idx: int,
+        conv_idx: int,
     ) -> Dict[str, Any]:
         """
-        Evaluate a single conversation and return scores, confidences, and reasoning
-        Uses all available models for evaluation, each model runs max_eval_try times
+        Simplified version: evaluate a single conversation and return scores, confidences, and reasoning
         """
         conversation_context = self._format_single_conversation(conversation_data)
         messages = self._construct_evaluation_prompt(conversation_context, task_id)
@@ -582,7 +620,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     conv_confidences.append(parsed_result["confidence"])
                 if parsed_result["reasoning"]:
                     conv_reasoning.append(
-                        f"Group{group_idx + 1}-Gen{gen_idx + 1}-Model{model_idx + 1}({selected_model})-Try{try_num + 1}: {parsed_result['reasoning']}"
+                        f"Conv{conv_idx}-Model{model_idx + 1}({selected_model})-Try{try_num + 1}: {parsed_result['reasoning']}"
                     )
 
         return {
@@ -609,6 +647,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         print("Stage 1: Generating all conversations for evaluation...")
         all_conversations = self._load_jsonl_conversations(
             data.model_name_or_path,
+            data.model_template,
             data.test_data_url,
             data.evaluation_arg_url,
             data.base_model,
@@ -633,52 +672,30 @@ class LLMJudgeValidationModule(BaseValidationModule):
             len(all_conversations) * len(available_eval_models) * max_eval_try
         )
 
+        # Stage 2: Direct parallel evaluation of all conversations
         print(
             f"Stage 2: Evaluating {len(all_conversations)} conversations with {len(available_eval_models)} models, "
-            f"{max_eval_try} tries each = {total_eval_calls} total evaluations using {eval_batch_size} parallel workers..."
+            f"{max_eval_try} tries each = {total_eval_calls} total evaluations using {eval_batch_size} workers..."
         )
 
-        # Group conversations by original input (multiple generations of same input)
-        grouped_conversations = {}
-        for conv in all_conversations:
-            # Use conversation content excluding assistant response to group same inputs
-            conversations = conv.get("conversations", [])
-            if conversations and len(conversations) >= 2:
-                # Use user queries to identify the same input
-                user_parts = [
-                    msg["content"] for msg in conversations if msg.get("role") == "user"
-                ]
-                input_key = "|".join(user_parts)
-            else:
-                input_key = f"single_{len(grouped_conversations)}"
-
-            if input_key not in grouped_conversations:
-                grouped_conversations[input_key] = []
-            grouped_conversations[input_key].append(conv)
-
-        # Stage 2: Parallel evaluation of all conversations
-        conversation_scores = []
-        conversation_confidences = []
-        all_conversation_reasoning = []
-
-        # Prepare all evaluation tasks
+        # Prepare evaluation tasks for all conversations directly
         evaluation_tasks = []
-        for group_idx, (input_key, conv_group) in enumerate(
-            grouped_conversations.items()
-        ):
-            for gen_idx, conversation_data in enumerate(conv_group):
-                evaluation_tasks.append(
-                    (
-                        conversation_data,
-                        data.task_id,
-                        eval_args,
-                        max_eval_try,
-                        group_idx,
-                        gen_idx,
-                    )
+        for idx, conversation_data in enumerate(all_conversations):
+            evaluation_tasks.append(
+                (
+                    conversation_data,
+                    data.task_id,
+                    eval_args,
+                    max_eval_try,
+                    idx,  # conversation index
                 )
+            )
 
-        # Execute evaluations in parallel
+        # Execute all evaluations in parallel
+        all_scores = []
+        all_confidences = []
+        all_reasoning = []
+
         with ThreadPoolExecutor(max_workers=eval_batch_size) as executor:
             # Submit all tasks
             future_to_task = {
@@ -703,61 +720,28 @@ class LLMJudgeValidationModule(BaseValidationModule):
                         }
                     )
 
-        # Process results and group them back by original input
-        result_index = 0
-        for group_idx, (input_key, conv_group) in enumerate(
-            grouped_conversations.items()
-        ):
-            group_scores = []
-            group_confidences = []
-            group_reasoning = []
+        # Process all results
+        for result in evaluation_results:
+            if result["scores"]:
+                # Average scores for this conversation across all models/tries
+                conv_avg_score = sum(result["scores"]) / len(result["scores"])
+                all_scores.append(conv_avg_score)
 
-            # Process results for this group
-            for gen_idx in range(len(conv_group)):
-                if result_index < len(evaluation_results):
-                    result = evaluation_results[result_index]
-                    result_index += 1
+            if result["confidences"]:
+                conv_avg_confidence = sum(result["confidences"]) / len(
+                    result["confidences"]
+                )
+                all_confidences.append(conv_avg_confidence)
 
-                    # Calculate average for this generation
-                    if result["scores"]:
-                        gen_avg_score = sum(result["scores"]) / len(result["scores"])
-                        group_scores.append(gen_avg_score)
-
-                    if result["confidences"]:
-                        gen_avg_confidence = sum(result["confidences"]) / len(
-                            result["confidences"]
-                        )
-                        group_confidences.append(gen_avg_confidence)
-
-                    if result["reasoning"]:
-                        group_reasoning.extend(result["reasoning"])
-
-            # Calculate average across all generations in this group
-            if group_scores:
-                group_avg_score = sum(group_scores) / len(group_scores)
-                conversation_scores.append(group_avg_score)
-
-                if group_confidences:
-                    group_avg_confidence = sum(group_confidences) / len(
-                        group_confidences
-                    )
-                    conversation_confidences.append(group_avg_confidence)
-
-                if group_reasoning:
-                    all_conversation_reasoning.extend(group_reasoning)
+            if result["reasoning"]:
+                all_reasoning.extend(result["reasoning"])
 
         # Calculate overall averages across all conversations
-        raw_avg_score = sum(conversation_scores) / len(conversation_scores)
+        raw_avg_score = sum(all_scores) / len(all_scores) if all_scores else 5.0
         overall_avg_confidence = (
-            sum(conversation_confidences) / len(conversation_confidences)
-            if conversation_confidences
-            else None
+            sum(all_confidences) / len(all_confidences) if all_confidences else None
         )
-        combined_reasoning = (
-            "\n\n".join(all_conversation_reasoning)
-            if all_conversation_reasoning
-            else None
-        )
+        combined_reasoning = "\n\n".join(all_reasoning) if all_reasoning else None
 
         # Normalize the final score to (0, 1) range
         overall_avg_score = self._normalize_score(raw_avg_score)
