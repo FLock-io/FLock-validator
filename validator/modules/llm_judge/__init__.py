@@ -20,7 +20,6 @@ from validator.modules.base import (
 from peft import PeftModel
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
-from .template import template_dict
 from loguru import logger
 
 
@@ -30,8 +29,8 @@ class LLMJudgeException(RecoverableException):
 
 
 class LLMJudgeConfig(BaseConfig):
-    gen_batch_size = 1
-    eval_batch_size = 10
+    gen_batch_size: int = 1
+    eval_batch_size: int = 10
 
 
 class LLMJudgeMetrics(BaseMetrics):
@@ -97,9 +96,15 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
     def _load_hf_model(self, model_name_or_path: str, base_model: str = ""):
         try:
+            # Clear CUDA cache before loading
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             if base_model:
                 # Load LoRA-adapted model
-                self.hf_tokenizer = AutoTokenizer.from_pretrained(base_model)
+                self.hf_tokenizer = AutoTokenizer.from_pretrained(
+                    base_model, trust_remote_code=True, use_fast=True
+                )
                 base_hf_model = AutoModelForCausalLM.from_pretrained(
                     base_model,
                     torch_dtype=(
@@ -107,6 +112,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     ),
                     device_map="auto" if torch.cuda.is_available() else None,
                     trust_remote_code=True,
+                    low_cpu_mem_usage=True,
                 )
                 self.hf_model = PeftModel.from_pretrained(
                     base_hf_model,
@@ -118,7 +124,9 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     trust_remote_code=True,
                 )
             else:
-                self.hf_tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+                self.hf_tokenizer = AutoTokenizer.from_pretrained(
+                    model_name_or_path, trust_remote_code=True, use_fast=True
+                )
                 self.hf_model = AutoModelForCausalLM.from_pretrained(
                     model_name_or_path,
                     torch_dtype=(
@@ -126,13 +134,20 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     ),
                     device_map="auto" if torch.cuda.is_available() else None,
                     trust_remote_code=True,
+                    low_cpu_mem_usage=True,
                 )
 
             # Add padding token if it doesn't exist
             if self.hf_tokenizer.pad_token is None:
                 self.hf_tokenizer.pad_token = self.hf_tokenizer.eos_token
 
+            # Set model to evaluation mode
+            self.hf_model.eval()
+
         except Exception as e:
+            # Clean up on failure
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             raise LLMJudgeException(
                 f"Failed to load HuggingFace model {model_name_or_path}: {e}"
             ) from e
@@ -142,7 +157,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         user_input: list = list[
             list[dict[str, str]]
         ],  # list of conversations, each conversation is a list of messages
-        max_length: int = 7000,
+        max_length: int = 2048,
         batch_size: int = 1,
         eval_args: dict = None,
     ) -> str:
@@ -153,35 +168,75 @@ class LLMJudgeValidationModule(BaseValidationModule):
             results = []
             for i in range(0, len(user_input), batch_size):
                 batch_conversations = user_input[i : i + batch_size]
-                batch_conversation_templates = [
-                    self.hf_tokenizer.apply_chat_template(
-                        conversation, tokenize=False, add_generation_token=True
-                    )
-                    for conversation in batch_conversations
-                ]
+
+                # Apply chat template with fallback
+                batch_conversation_templates = []
+                for conversation in batch_conversations:
+                    try:
+                        template = self.hf_tokenizer.apply_chat_template(
+                            conversation, tokenize=False, add_generation_token=True
+                        )
+                        batch_conversation_templates.append(template)
+                    except Exception as e:
+                        fallback = ""
+                        for msg in conversation:
+                            role = msg.get("role", "")
+                            content = msg.get("content", "")
+                            if role == "system":
+                                fallback += f"<|im_start|>system\n{content}<|im_end|>\n"
+                            elif role == "user":
+                                fallback += f"<|im_start|>user\n{content}<|im_end|>\n"
+                            elif role == "assistant":
+                                fallback += (
+                                    f"<|im_start|>assistant\n{content}<|im_end|>\n"
+                                )
+                        # Add assistant start token for generation
+                        fallback += "<|im_start|>assistant\n"
+                        batch_conversation_templates.append(fallback)
+
+                # Simple tokenization
                 model_inputs = self.hf_tokenizer(
                     batch_conversation_templates,
                     return_tensors="pt",
                     padding=True,
                     truncation=True,
+                    max_length=max_length,
                     padding_side="left",
-                ).to(self.hf_model.device)
-                outputs = self.hf_model.generate(
-                    **model_inputs,
-                    max_new_tokens=max_length,
-                    temperature=(
-                        eval_args.get("gen_temperature", 0.7) if eval_args else 0.7
-                    ),
-                    do_sample=True,
-                    pad_token_id=self.hf_tokenizer.eos_token_id,
-                    eos_token_id=self.hf_tokenizer.eos_token_id,
                 )
-                for output in outputs:
-                    generated_ids = output[model_inputs["input_ids"].shape[1] :]
+
+                # Move to device if available
+                if (
+                    torch.cuda.is_available()
+                    and next(self.hf_model.parameters()).is_cuda
+                ):
+                    model_inputs = {k: v.cuda() for k, v in model_inputs.items()}
+
+                with torch.no_grad():
+                    outputs = self.hf_model.generate(
+                        **model_inputs,
+                        max_new_tokens=min(max_length, 2048),
+                        min_new_tokens=5,
+                        temperature=eval_args.get("gen_temperature", 0.7),
+                        do_sample=True,
+                        top_p=0.9,
+                        pad_token_id=self.hf_tokenizer.eos_token_id,
+                        eos_token_id=self.hf_tokenizer.eos_token_id,
+                        repetition_penalty=1.1,
+                    )
+
+                # Decode responses
+                for j, output in enumerate(outputs):
+                    # Get the input length for this specific sequence
+                    input_length = model_inputs["input_ids"][j].shape[0]
+
+                    # Extract only the newly generated tokens
+                    generated_ids = output[input_length:]
                     assistant_response = self.hf_tokenizer.decode(
                         generated_ids, skip_special_tokens=True
                     ).strip()
+
                     results.append(assistant_response)
+                print(f"Generated batch of size {i+batch_size}/{len(user_input)}")
 
             return results
 
@@ -417,16 +472,9 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 }
                 generated_conversations.append(conversation)
 
-                print(
-                    f"Generated conversation {input_item['line_num']}/{len(input_conversations)}, generation {gen_try + 1}/{max_gen_try}"
-                )
-
         if not generated_conversations:
             raise LLMJudgeException("No valid conversations were generated")
 
-        print(
-            f"Successfully generated {len(generated_conversations)} conversations using model {model_name_or_path}"
-        )
         return generated_conversations
 
     def _format_single_conversation(self, conversation_data: Dict[str, Any]) -> str:
@@ -514,18 +562,18 @@ class LLMJudgeValidationModule(BaseValidationModule):
         available_eval_models = [
             model for model in eval_model_list if model in self.available_models
         ]
-        
+
         # If no models specified or available, use all available models
         if not available_eval_models:
             available_eval_models = self.available_models
-        
+
         # Evaluate with each model for max_eval_try times
         for model_idx, model_name in enumerate(available_eval_models):
             for try_num in range(max_eval_try):
                 # Create modified eval_args to specify the exact model to use
                 model_eval_args = eval_args.copy()
                 model_eval_args["selected_model"] = model_name
-                
+
                 response, selected_model = self._call_gpt(messages, model_eval_args)
                 parsed_result = self._parse_llm_response(response)
 
@@ -558,7 +606,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         _ = kwargs
 
         # Stage 1: Generate all responses
-        print("Stage 1: Generating all responses...")
+        print("Stage 1: Generating all conversations for evaluation...")
         all_conversations = self._load_jsonl_conversations(
             data.model_name_or_path,
             data.test_data_url,
@@ -572,7 +620,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         )
         max_eval_try = eval_args.get("max_eval_try", 3)  # Default max evaluation tries
         eval_batch_size = self.config.eval_batch_size
-        
+
         # Calculate total evaluation calls
         eval_model_list = eval_args.get("eval_model_list", [])
         available_eval_models = [
@@ -580,8 +628,10 @@ class LLMJudgeValidationModule(BaseValidationModule):
         ]
         if not available_eval_models:
             available_eval_models = self.available_models
-        
-        total_eval_calls = len(all_conversations) * len(available_eval_models) * max_eval_try
+
+        total_eval_calls = (
+            len(all_conversations) * len(available_eval_models) * max_eval_try
+        )
 
         print(
             f"Stage 2: Evaluating {len(all_conversations)} conversations with {len(available_eval_models)} models, "
@@ -591,7 +641,6 @@ class LLMJudgeValidationModule(BaseValidationModule):
         # Group conversations by original input (multiple generations of same input)
         grouped_conversations = {}
         for conv in all_conversations:
-            # Create a unique identifier for the original input
             # Use conversation content excluding assistant response to group same inputs
             conversations = conv.get("conversations", [])
             if conversations and len(conversations) >= 2:

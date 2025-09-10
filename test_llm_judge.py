@@ -16,6 +16,10 @@ from validator.modules.llm_judge import (
     LLMJudgeInputData,
 )
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 def create_mock_response(content: str, status_code: int = 200):
     mock_response = MagicMock()
@@ -35,14 +39,14 @@ def mock_requests_get(url: str):
         test_data_path = (
             Path(__file__).parent
             / "validator/modules/llm_judge/test_data"
-            / "simple_test.jsonl"
+            / "final_validation_set.jsonl"
         )
         content = load_local_file(test_data_path)
         return create_mock_response(content)
 
     elif "eval_args.json" in url:
         eval_args = {
-            "eval_model_list": ["qwen235b"],
+            "eval_model_list": ["qwen3-235b-a22b-instruct-2507"],
             "gen_temperature": 0.1,
             "eval_temperature": 0.5,
             "max_eval_try": 1,
@@ -61,12 +65,15 @@ def test_llm_judge():
         if not os.getenv(var):
             print(f"Warning: {var} not set. Set it before running the test.")
 
-    # Create configuration
+    # Enable CUDA debugging if available
+    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+
+    # Create configuration with smaller batch sizes for stability
     config = LLMJudgeConfig(gen_batch_size=1, eval_batch_size=1)
 
-    # Create input data
+    # Create input data with a simpler, more stable model
     input_data = LLMJudgeInputData(
-        model_name_or_path="microsoft/DialoGPT-medium",
+        model_name_or_path="jenniellama/task-10-Qwen-Qwen2.5-7B-Instruct",
         task_id=1,
         test_data_url="https://mock.example.com/test_data.jsonl",
         evaluation_arg_url="https://mock.example.com/eval_args.json",
