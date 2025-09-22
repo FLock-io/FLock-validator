@@ -47,7 +47,6 @@ class LLMJudgeInputData(BaseInputData):
     evaluation_arg_url: str
     model_template: Optional[str] = "default"
     base_model: Optional[str] = None  # For LoRA-adapted models
-    evaluation_criteria: Optional[str] = None
 
 
 class LLMJudgeValidationModule(BaseValidationModule):
@@ -422,6 +421,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
                     # Extract conversation history for multi-turn support
                     conversation_to_process = []
+                    reference_response = None
 
                     if "conversations" in json_data:
                         conversations = json_data["conversations"]
@@ -435,11 +435,13 @@ class LLMJudgeValidationModule(BaseValidationModule):
                                         {"role": role, "content": content}
                                     )
 
-                            # Remove last assistant message if it exists
+                            # Extract reference response (last assistant message) if it exists
+                            reference_response = None
                             if (
                                 conversation_to_process
                                 and conversation_to_process[-1]["role"] == "assistant"
                             ):
+                                reference_response = conversation_to_process[-1]["content"]
                                 conversation_to_process = conversation_to_process[:-1]
 
                     # If no conversations found, try to extract from "user" field
@@ -462,6 +464,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                         {
                             "conversation": input_conversations_data,
                             "line_num": line_num,
+                            "reference": reference_response,
                         }
                     )
 
@@ -509,6 +512,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     "conversations": final_conversations,
                     "generation_index": gen_try,
                     "total_generations": max_gen_try,
+                    "reference": input_item.get("reference"),
                 }
                 generated_conversations.append(conversation)
 
@@ -541,11 +545,15 @@ class LLMJudgeValidationModule(BaseValidationModule):
         return "\n\n".join(formatted_parts)
 
     def _construct_evaluation_prompt(
-        self, conversation_context: str, task_id: int
+        self, conversation_context: str, task_id: int, reference: str = None
     ) -> List[Dict[str, str]]:
         """Construct evaluation prompt for a single conversation"""
         try:
-            user_message = get_prompt(task_id, conversation_context)
+            if reference and task_id == 2:
+                # Use reference evaluation prompt
+                user_message = get_prompt(task_id, conversation_context, reference)
+            else:
+                user_message = get_prompt(task_id, conversation_context)
         except ValueError as e:
             user_message = get_prompt(1, conversation_context)
             print(f"Warning: {e}. Using default prompt.")
@@ -589,7 +597,8 @@ class LLMJudgeValidationModule(BaseValidationModule):
         Simplified version: evaluate a single conversation and return scores, confidences, and reasoning
         """
         conversation_context = self._format_single_conversation(conversation_data)
-        messages = self._construct_evaluation_prompt(conversation_context, task_id)
+        reference = conversation_data.get("reference")
+        messages = self._construct_evaluation_prompt(conversation_context, task_id, reference)
 
         conv_scores = []
         conv_confidences = []
