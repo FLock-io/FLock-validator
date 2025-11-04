@@ -1,0 +1,7 @@
+name: rl
+dependencies:
+  - numpy
+  - pip
+  - pip:
+    - onnxruntime  # ONNX Runtime for inference
+    - huggingface-hub  # For downloading models from HuggingFace
