@@ -345,6 +345,78 @@ def upload_to_huggingface(
         print(f"Error uploading to Hugging Face: {e}")
 
 
+def submit_task(
+    task_id: int,
+    model_repo_id: str,
+    model_filename: str,
+    test_X_url: str,
+    test_Info_url: str,
+    gpu_type: str = None,
+    flock_api_key: str = None,
+):
+    """
+    Submit task to Flock API
+
+    Args:
+        task_id: Flock task ID
+        model_repo_id: HuggingFace repository ID (e.g., "username/model-name")
+        model_filename: ONNX model filename (e.g., "mlp_example.onnx")
+        test_X_url: URL to test X data (.npy file)
+        test_Info_url: URL to test Info data (.npy file)
+        gpu_type: GPU type used for training (optional)
+        flock_api_key: Flock API key (or set FLOCK_API_KEY environment variable)
+    """
+    import json
+    import requests
+
+    # Get API key from environment if not provided
+    if flock_api_key is None:
+        flock_api_key = os.environ.get("FLOCK_API_KEY")
+        if flock_api_key is None:
+            print(
+                "Error: No Flock API key provided. Set FLOCK_API_KEY environment variable or pass flock_api_key parameter."
+            )
+            return
+
+    FED_LEDGER_BASE_URL = "https://fed-ledger-prod.flock.io/api/v1"
+
+    payload = json.dumps(
+        {
+            "task_id": task_id,
+            "data": {
+                "model_repo_id": model_repo_id,
+                "model_filename": model_filename,
+                "task_type": "reinforcement_learning",
+                "test_X_url": test_X_url,
+                "test_Info_url": test_Info_url,
+                "gpu_type": gpu_type,
+            },
+        }
+    )
+
+    headers = {
+        "flock-api-key": flock_api_key,
+        "Content-Type": "application/json",
+    }
+
+    print(f"\nSubmitting task to Flock...")
+    print(f"Task ID: {task_id}")
+    print(f"Model: {model_repo_id}/{model_filename}")
+
+    response = requests.request(
+        "POST",
+        f"{FED_LEDGER_BASE_URL}/tasks/submit-result",
+        headers=headers,
+        data=payload,
+    )
+
+    if response.status_code != 200:
+        raise Exception(f"Failed to submit task: {response.text}")
+
+    print(f"Task submitted successfully!")
+    return response.json()
+
+
 if __name__ == "__main__":
     # Train the model
     log = train_mlp(
@@ -361,18 +433,20 @@ if __name__ == "__main__":
     )
 
     # Optional: Upload to Hugging Face
-    # Uncomment and configure the following lines to upload your model
-    """
     upload_to_huggingface(
         model_path="runs/mlp_example.onnx",
         repo_id="your-username/mlp-example",  # Change to your repo
         token=None,  # Will use HF_TOKEN environment variable
-        commit_message="Upload trained MLP model"
+        commit_message="Upload trained MLP model",
     )
-    """
 
-    print("\nTraining pipeline completed!")
-    print("To upload to Hugging Face:")
-    print("1. Install: pip install huggingface_hub")
-    print("2. Set token: export HF_TOKEN=your_token")
-    print("3. Uncomment the upload_to_huggingface() call above")
+    # Optional: Submit task to Flock
+    submit_task(
+        task_id=123,  # Your Flock task ID
+        model_repo_id="your-username/mlp-example",
+        model_filename="mlp_example.onnx",
+        test_X_url="https://your-storage.com/X_test.npy",
+        test_Info_url="https://your-storage.com/Info_test.npy",
+        gpu_type="A100",  # Optional
+        flock_api_key=None,  # Will use FLOCK_API_KEY environment variable
+    )
