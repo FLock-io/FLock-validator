@@ -4,8 +4,12 @@ import time
 import numpy as np
 import torch
 import torch.nn as nn
+import requests
+import json
 from torch.utils.data import Dataset, DataLoader
 from typing import Tuple, Dict
+
+FED_LEDGER_BASE_URL = "https://fed-ledger-prod.flock.io/api/v1"
 
 
 class MLP(nn.Module):
@@ -345,26 +349,30 @@ def upload_to_huggingface(
         print(f"Error uploading to Hugging Face: {e}")
 
 
-def submit_task(
+# ============================================================================
+# VALIDATOR WORKFLOW FUNCTIONS
+# ============================================================================
+
+
+def get_submission_to_validate(
     task_id: int,
-    model_repo_id: str,
-    model_filename: str,
-    test_X_url: str,
-    test_Info_url: str,
-    gpu_type: str = None,
+    task_type: str = "reinforcement_learning",
     flock_api_key: str = None,
 ):
     """
-    Submit task to Flock API
+    Get a random trainer submission to validate from Flock backend
 
     Args:
         task_id: Flock task ID
-        model_repo_id: HuggingFace repository ID (e.g., "username/model-name")
-        model_filename: ONNX model filename (e.g., "mlp_example.onnx")
-        test_X_url: URL to test X data (.npy file)
-        test_Info_url: URL to test Info data (.npy file)
-        gpu_type: GPU type used for training (optional)
+        task_type: Task type (default: "reinforcement_learning")
         flock_api_key: Flock API key (or set FLOCK_API_KEY environment variable)
+
+    Returns:
+        Dictionary containing submission info:
+        - submission_id: ID of the submission (assigned by backend)
+        - test_data_url: URL to .npz test data (provided by backend)
+        - model_repo_id: HuggingFace repo ID (from trainer's Step 2 submission)
+        - model_filename: Model filename (from trainer's Step 2 submission)
     """
     import json
     import requests
@@ -376,21 +384,12 @@ def submit_task(
             print(
                 "Error: No Flock API key provided. Set FLOCK_API_KEY environment variable or pass flock_api_key parameter."
             )
-            return
-
-    FED_LEDGER_BASE_URL = "https://fed-ledger-prod.flock.io/api/v1"
+            return None
 
     payload = json.dumps(
         {
             "task_id": task_id,
-            "data": {
-                "model_repo_id": model_repo_id,
-                "model_filename": model_filename,
-                "task_type": "reinforcement_learning",
-                "test_X_url": test_X_url,
-                "test_Info_url": test_Info_url,
-                "gpu_type": gpu_type,
-            },
+            "task_type": task_type,
         }
     )
 
@@ -399,26 +398,140 @@ def submit_task(
         "Content-Type": "application/json",
     }
 
-    print(f"\nSubmitting task to Flock...")
-    print(f"Task ID: {task_id}")
-    print(f"Model: {model_repo_id}/{model_filename}")
-
     response = requests.request(
         "POST",
-        f"{FED_LEDGER_BASE_URL}/tasks/submit-result",
+        f"{FED_LEDGER_BASE_URL}",
         headers=headers,
         data=payload,
     )
 
     if response.status_code != 200:
-        raise Exception(f"Failed to submit task: {response.text}")
+        raise Exception(f"Failed to get submission: {response.text}")
 
-    print(f"Task submitted successfully!")
+    submission = response.json()
+    return submission
+
+
+def validate_submission(
+    submission: dict,
+    per_device_eval_batch_size: int = 1024,
+    seed: int = 7,
+):
+    """
+    Validate a submission using RLValidationModule
+
+    Args:
+        submission: Dictionary from backend containing:
+            - submission_id: ID of the submission
+            - test_data_url: URL to .npz file
+            - model_repo_id: HuggingFace repo
+            - model_filename: Model file name
+        per_device_eval_batch_size: Batch size for evaluation
+        seed: Random seed for reproducibility
+
+    Returns:
+        Dictionary containing validation metrics (average_reward, etc.)
+    """
+    from validator.modules.rl import (
+        RLValidationModule,
+        RLConfig,
+        RLInputData,
+    )
+
+    # Create config
+    config = RLConfig(per_device_eval_batch_size=per_device_eval_batch_size, seed=seed)
+
+    # Create validation module
+    module = RLValidationModule(config)
+
+    # Create input data
+    input_data = RLInputData(
+        model_repo_id=submission["model_repo_id"],
+        model_filename=submission["model_filename"],
+        task_type="reinforcement_learning",
+        test_data_url=submission["test_data_url"],
+        task_id=submission.get("task_id", 0),
+        required_metrics=["average_reward"],
+    )
+
+    # Run validation (automatically downloads model + dataset)
+    print("[Validator] Running validation...")
+    metrics = module.validate(input_data)
+
+    # Cleanup
+    module.cleanup()
+
+    print(f"[Validator] Validation complete!")
+    print(f"  - Average Reward: {metrics.average_reward}")
+
+    # Convert metrics to dictionary
+    return {
+        "average_reward": metrics.average_reward,
+    }
+
+
+def submit_validation_result(
+    task_id: int,
+    task_type: str,
+    submission_id: int,
+    metrics: dict,
+    flock_api_key: str = None,
+):
+    """
+    Submit validation results backend
+
+    Args:
+        task_id: Flock task ID
+        task_type: Task type (e.g."reinforcement_learning")
+        submission_id: Submission ID from get_submission_to_validate
+        metrics: Dictionary containing validation metrics (average_reward, etc.)
+        flock_api_key: Flock API key
+    """
+
+    # Get API key from environment if not provided
+    if flock_api_key is None:
+        flock_api_key = os.environ.get("FLOCK_API_KEY")
+        if flock_api_key is None:
+            print(
+                "Error: No Flock API key provided. Set FLOCK_API_KEY environment variable or pass flock_api_key parameter."
+            )
+            return
+
+    payload = json.dumps(
+        {
+            "task_id": task_id,
+            "task_type": task_type,
+            "submission_id": submission_id,
+            "metrics": metrics,
+        }
+    )
+
+    headers = {
+        "flock-api-key": flock_api_key,
+        "Content-Type": "application/json",
+    }
+
+    response = requests.request(
+        "POST",
+        f"{FED_LEDGER_BASE_URL}",
+        headers=headers,
+        data=payload,
+    )
+
+    if response.status_code != 200:
+        raise Exception(f"Failed to submit validation result: {response.text}")
+
+    print(f"[Validator] Validation result submitted successfully!")
     return response.json()
 
 
 if __name__ == "__main__":
-    # Train the model
+    print("=" * 70)
+    print("RL TRAINING AND VALIDATION EXAMPLE")
+    print("=" * 70)
+
+    # STEP 1: TRAINER - Train the model
+    print("\n[Step 1] Training model...")
     log = train_mlp(
         data_dir="data",
         output_dir="runs",
@@ -428,25 +541,65 @@ if __name__ == "__main__":
         epochs=100,
         learning_rate=1e-3,
         weight_decay=1e-5,
-        validation_split=0.2,  # Use 20% of data for validation
+        validation_split=0.2,
         seed=42,
     )
+    print("[Step 1] ✓ Training complete!")
 
-    # Optional: Upload to Hugging Face
+    # STEP 2: TRAINER - Upload model to HuggingFace
+    print("\n[Step 2] Uploading model to HuggingFace...")
+    # Define model info that will be used later in validation
+    model_repo_id = "your-username/mlp-example"  # Change to your repo
+    model_filename = "mlp_example.onnx"
+
     upload_to_huggingface(
         model_path="runs/mlp_example.onnx",
-        repo_id="your-username/mlp-example",  # Change to your repo
+        repo_id=model_repo_id,
         token=None,  # Will use HF_TOKEN environment variable
         commit_message="Upload trained MLP model",
     )
+    print("[Step 2] ✓ Model uploaded to HuggingFace!")
 
-    # Optional: Submit task to Flock
-    submit_task(
-        task_id=123,  # Your Flock task ID
-        model_repo_id="your-username/mlp-example",
-        model_filename="mlp_example.onnx",
-        test_X_url="https://your-storage.com/X_test.npy",
-        test_Info_url="https://your-storage.com/Info_test.npy",
-        gpu_type="A100",  # Optional
+    # STEP 3: VALIDATOR - Get submission to validate from backend
+    print("\n[Step 3] Getting submission to validate from backend...")
+    task_id = 123  # Change to your task ID
+    submission = get_submission_to_validate(
+        task_id=task_id,
+        task_type="reinforcement_learning",
+        flock_api_key=None,
+    )
+
+    if submission is None:
+        print("[Step 3] ✗ Failed to get submission from backend")
+        exit(1)
+
+    # Add model info from Step 2 to the submission
+    submission["model_repo_id"] = model_repo_id
+    submission["model_filename"] = model_filename
+
+    print("[Step 3] ✓ Got submission from backend!")
+    print(f"  Added model info: {model_repo_id}/{model_filename}")
+
+    # STEP 4: VALIDATOR - Download model + dataset and validate
+    print("\n[Step 4] Validating submission...")
+    metrics = validate_submission(
+        submission=submission,
+        per_device_eval_batch_size=1024,
+        seed=7,
+    )
+    print("[Step 4] ✓ Validation complete!")
+
+    # STEP 5: VALIDATOR - Submit validation results back to backend
+    print("\n[Step 5] Submitting validation results to backend...")
+    submit_validation_result(
+        task_id=task_id,
+        task_type="reinforcement_learning",
+        submission_id=submission.get("submission_id"),
+        metrics=metrics,
         flock_api_key=None,  # Will use FLOCK_API_KEY environment variable
     )
+    print("[Step 5] ✓ Validation results submitted!")
+
+    print("\n" + "=" * 70)
+    print("ALL STEPS COMPLETE!")
+    print("=" * 70)

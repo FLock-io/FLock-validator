@@ -1,5 +1,4 @@
 import numpy as np
-import pandas as pd
 from validator.modules.base import (
     BaseValidationModule,
     BaseConfig,
@@ -9,7 +8,6 @@ from validator.modules.base import (
 from validator.exceptions import RecoverableException
 from huggingface_hub import hf_hub_download
 import onnxruntime as ort
-import os
 from validator.modules.rl.env import EnvLite
 from io import BytesIO
 import requests
@@ -39,8 +37,7 @@ class RLInputData(BaseInputData):
     model_filename: str  # Name of the ONNX model file
 
     task_type: str
-    test_X_url: str
-    test_Info_url: str
+    test_data_url: str  # URL to .npz file containing X_test and Info_test
 
 
 class RLValidationModule(BaseValidationModule):
@@ -71,10 +68,21 @@ class RLValidationModule(BaseValidationModule):
 
     def validate(self, data: RLInputData, **kwargs) -> RLMetrics:
         """Validate the RL model and compute rewards"""
-        # Load model and data
+        # Load model
         model = self._load_model(data.model_repo_id, data.model_filename)
-        test_X = self._load_data(data.test_X_url)
-        test_Info = self._load_data(data.test_Info_url)
+
+        # Download and load test data (.npz file containing X_test and Info_test)
+        print(f"Downloading test data from {data.test_data_url}")
+        response = requests.get(data.test_data_url)
+        response.raise_for_status()
+
+        # Load the .npz file and extract X_test and Info_test
+        with np.load(BytesIO(response.content)) as test_data:
+            test_X = test_data['X_test']
+            test_Info = test_data['Info_test']
+
+        print(f"Loaded test data: X_test {test_X.shape}, Info_test {test_Info.shape}")
+
         env = EnvLite(test_X, test_Info, batch_size=self.batch_size, seed=self.seed)
 
         N = env.N  # total samples
