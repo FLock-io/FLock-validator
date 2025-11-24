@@ -371,6 +371,7 @@ def submit_task(
         f"{FED_LEDGER_BASE_URL}/tasks/submit-result",
         headers=headers,
         data=payload,
+        timeout=30,
     )
     if response.status_code != 200:
         raise Exception(f"Failed to submit task: {response.text}")
