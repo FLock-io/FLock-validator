@@ -91,7 +91,7 @@ class RLValidationModule(BaseValidationModule):
 
         # Download and load test data (.npz file containing X_test and Info_test)
         print(f"Downloading test data from {data.validation_set_url}")
-        response = requests.get(data.validation_set_url)
+        response = requests.get(data.validation_set_url, timeout=10)
         response.raise_for_status()
 
         # Load the .npz file and extract X_test and Info_test
