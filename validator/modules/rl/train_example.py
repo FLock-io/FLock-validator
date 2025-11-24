@@ -357,7 +357,7 @@ def submit_task(
             "task_id": task_id,
             "data": {
                 "hg_repo_id": hg_repo_id,
-                "base_model": model_filename,
+                "model_filename": model_filename,
                 "revision": revision,
             },
         }
