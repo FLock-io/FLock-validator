@@ -94,10 +94,11 @@ class EnvLite:
 
     def step(self, action: np.ndarray) -> np.ndarray:
         assert self.X_b is not None, "Call reset() before step()."
+        current_batch_size = self.X_b.shape[0]
         assert action.shape == (
-            self.batch_size,
+            current_batch_size,
             self.V,
-        ), f"action must be {(self.batch_size, self.V)}"
+        ), f"action must be {(current_batch_size, self.V)}, but got {action.shape}"
         probs = self._row_normalize(action.astype(np.float32))
 
         alloc = probs * self.qty_b[:, None]
