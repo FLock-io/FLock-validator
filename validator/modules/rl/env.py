@@ -115,19 +115,3 @@ class EnvLite:
 
         return reward.astype(np.float32)
 
-
-if __name__ == "__main__":
-    X = np.load("data/X_train.npy")
-    Info = np.load("data/Info_train.npy")
-    env = EnvLite(X, Info, batch_size=1024, seed=8)
-    X_b, Info_b = env.reset()
-
-    action = np.full(
-        (env.batch_size, env.V), 1.0 / env.V, dtype=np.float32
-    )  # function of X_b
-
-    reward = env.step(action)
-    print("Batch features:", X_b.shape)
-    print("Batch Info:", Info_b.shape)
-    print("Action:", action.shape)
-    print("Reward:", reward.shape, "mean=", reward.mean().item())
