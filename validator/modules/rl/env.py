@@ -111,7 +111,7 @@ class EnvLite:
         reward = ((self.rebate_b / 10000.0) * filled + self.punish_b * unfilled).sum(
             axis=1
         )
-        reward = reward / np.log(self.qty_b[:])
+        reward = reward / np.log1p(self.qty_b[:])
 
         return reward.astype(np.float32)
 
