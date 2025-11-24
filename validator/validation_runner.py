@@ -1,7 +1,6 @@
 import importlib
 import time
 import sys
-from unittest.mock import Base
 from loguru import logger
 from .exceptions import RecoverableException
 from .api import FedLedger

@@ -1,9 +1,7 @@
 # This script acts as an entrypoint and is used to setup, manage and run conda environments.
 
-import os
 import sys
 from pathlib import Path
-from validator.utils import is_latest_version
 from validator import conda
 
 ENV_NAME_PREFIX = "flock-validation-"
