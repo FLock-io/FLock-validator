@@ -1,7 +1,12 @@
 name: rl
+channels:
+  - conda-forge
+  - defaults
 dependencies:
+  - python>=3.9
   - numpy
+  - onnxruntime
+  - onnx
   - pip
   - pip:
-    - onnxruntime  # ONNX Runtime for inference
     - huggingface-hub  # For downloading models from HuggingFace
