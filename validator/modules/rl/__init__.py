@@ -73,7 +73,7 @@ class RLValidationModule(BaseValidationModule):
         return session
 
     def _load_data(self, data_url: str) -> np.ndarray:
-        "download and load testa data"
+        "download and load test data"
         response = requests.get(data_url, timeout=10)
         response.raise_for_status()
         data = np.load(BytesIO(response.content))
