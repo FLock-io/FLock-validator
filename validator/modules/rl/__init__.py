@@ -5,17 +5,15 @@ from validator.modules.base import (
     BaseInputData,
     BaseMetrics,
 )
-from validator.exceptions import RecoverableException
+from validator.exceptions import InvalidModelParametersException
 from huggingface_hub import hf_hub_download
 import onnxruntime as ort
+import onnx
 from validator.modules.rl.env import EnvLite
 from io import BytesIO
 import requests
 
-
-class InvalidRLEnvironmentException(RecoverableException):
-    pass
-
+LOWEST_POSSIBLE_REWARD = -999
 
 class RLConfig(BaseConfig):
     """Configuration for RL validation module"""
@@ -33,11 +31,11 @@ class RLMetrics(BaseMetrics):
 class RLInputData(BaseInputData):
     """Input data for RL validation"""
 
-    model_repo_id: str  # HuggingFace repository ID for the RL model
-    model_filename: str  # Name of the ONNX model file
-
-    task_type: str
-    test_data_url: str  # URL to .npz file containing X_test and Info_test
+    model_repo_id: str
+    model_filename: str
+    revision: str
+    validation_set_url: str
+    max_params: int
 
 
 class RLValidationModule(BaseValidationModule):
@@ -52,16 +50,31 @@ class RLValidationModule(BaseValidationModule):
         self.batch_size = config.per_device_eval_batch_size
         self.seed = config.seed
 
-    def _load_model(self, repo_id: str, filename: str = "model.onnx"):
+    def _load_model(self, repo_id: str, filename: str = "model.onnx", revision: str = "main", max_params: int = None):
         """Download and load ONNX model from HuggingFace Hub"""
-        model_path = hf_hub_download(repo_id, filename)
+        model_path = hf_hub_download(repo_id, filename, revision=revision)
+
+        # Check parameter count
+        onnx_model = onnx.load(model_path)
+        total_params = 0
+        for tensor in onnx_model.graph.initializer:
+            params = 1
+            for dim in tensor.dims:
+                params *= dim
+            total_params += params
+
+        if max_params and total_params > max_params:
+            raise InvalidModelParametersException(f"Model parameters {total_params} exceed limit {max_params}")
+
+        print(f"Model parameters: {total_params}")
+
         session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
         print(f"Loaded ONNX model from {model_path}")
         return session
 
     def _load_data(self, data_url: str) -> np.ndarray:
         "download and load testa data"
-        response = requests.get(data_url)
+        response = requests.get(data_url, timeout=10)
         response.raise_for_status()
         data = np.load(BytesIO(response.content))
         return data
@@ -69,17 +82,22 @@ class RLValidationModule(BaseValidationModule):
     def validate(self, data: RLInputData, **kwargs) -> RLMetrics:
         """Validate the RL model and compute rewards"""
         # Load model
-        model = self._load_model(data.model_repo_id, data.model_filename)
+        try:
+            model = self._load_model(data.model_repo_id, data.model_filename, data.revision, max_params=data.max_params)
+        except InvalidModelParametersException as e:
+            # lowest possible reward for invalid model parameters
+            print(f"Invalid model parameters: {e}")
+            return RLMetrics(average_reward=LOWEST_POSSIBLE_REWARD)
 
         # Download and load test data (.npz file containing X_test and Info_test)
-        print(f"Downloading test data from {data.test_data_url}")
-        response = requests.get(data.test_data_url)
+        print(f"Downloading test data from {data.validation_set_url}")
+        response = requests.get(data.validation_set_url)
         response.raise_for_status()
 
         # Load the .npz file and extract X_test and Info_test
         with np.load(BytesIO(response.content)) as test_data:
-            test_X = test_data['X_test']
-            test_Info = test_data['Info_test']
+            test_X = test_data['X']
+            test_Info = test_data['Info']
 
         print(f"Loaded test data: X_test {test_X.shape}, Info_test {test_Info.shape}")
 
