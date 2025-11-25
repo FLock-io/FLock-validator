@@ -118,9 +118,8 @@ class ValidationRunner:
                 task_submission_data = resp.json()["task_submission"]["data"]
                 validation_assignment_data = resp.json()["data"]
                 merged_data = {**task_submission_data, **validation_assignment_data}
-                input_data = module_obj.input_data_schema.model_validate_json(merged_data)
+                input_data = module_obj.input_data_schema.model_validate(merged_data)
                 assignment_id = resp.json()["id"]
-                
                 metrics = self.perform_validation(assignment_id, task_id, input_data)
                 if metrics is None:
                     continue
@@ -128,4 +127,7 @@ class ValidationRunner:
                     assignment_id=assignment_id,
                     data=metrics.model_dump(),
                 )
+                # if successful, log
+                if resp_submit.status_code == 200:
+                    logger.info(f"Validation result submitted successfully for assignment {assignment_id}")
                 resp_submit.raise_for_status()
