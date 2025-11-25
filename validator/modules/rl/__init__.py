@@ -31,7 +31,7 @@ class RLMetrics(BaseMetrics):
 class RLInputData(BaseInputData):
     """Input data for RL validation"""
 
-    model_repo_id: str
+    hg_repo_id: str
     model_filename: str
     revision: str
     validation_set_url: str
@@ -83,7 +83,7 @@ class RLValidationModule(BaseValidationModule):
         """Validate the RL model and compute rewards"""
         # Load model
         try:
-            model = self._load_model(data.model_repo_id, data.model_filename, data.revision, max_params=data.max_params)
+            model = self._load_model(data.hg_repo_id, data.model_filename, data.revision, max_params=data.max_params)
         except InvalidModelParametersException as e:
             # lowest possible reward for invalid model parameters
             print(f"Invalid model parameters: {e}")
