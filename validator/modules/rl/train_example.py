@@ -149,7 +149,7 @@ def train_mlp(
     X_val = X_all[val_indices]
     y_val = y_all[val_indices]
 
-    print(f"\nData split:")
+    print("\nData split:")
     print(f"Training samples: {len(X_train)}")
     print(f"Validation samples: {len(X_val)}")
 
@@ -308,7 +308,7 @@ def upload_to_huggingface(
         )
         return
 
-    print(f"\nUploading model to Hugging Face...")
+    print("\nUploading model to Hugging Face...")
     print(f"Repository: {repo_id}")
     print(f"Model path: {model_path}")
 
@@ -428,4 +428,4 @@ if __name__ == "__main__":
         revision=commit_hash,
     )
 
-    print(f"[Step 3] ✓ Model submitted to fed ledger!")
+    print("[Step 3] ✓ Model submitted to fed ledger!")
