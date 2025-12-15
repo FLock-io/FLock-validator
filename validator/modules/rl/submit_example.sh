@@ -1,0 +1,1 @@
+python run.py rl submit_example --model-repo-id flockai/rl-trade-model --test-X-url https://huggingface.co/datasets/flockai/rl-validation-data/resolve/main/test_X.npy --test-Info-url https://huggingface.co/datasets/flockai/rl-validation-data/resolve/main/test_Info.npy
