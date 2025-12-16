@@ -54,7 +54,18 @@ class RLValidationModule(BaseValidationModule):
         """Download and load ONNX model from HuggingFace Hub"""
         model_path = hf_hub_download(repo_id, filename, revision=revision)
 
+        # Try to download external data file if it exists
+        # ONNX models with large weights may store data in a separate .onnx.data file
+        data_filename = f"{filename}.data"
+        try:
+            data_path = hf_hub_download(repo_id, data_filename, revision=revision)
+            print(f"Downloaded external data file: {data_path}")
+        except Exception as e:
+            # External data file may not exist, which is fine for models with embedded weights
+            print(f"External data file not found (this is OK if model has embedded weights): {e}")
+
         # Check parameter count
+        # onnx.load() will automatically look for .onnx.data in the same directory
         onnx_model = onnx.load(model_path)
         total_params = 0
         for tensor in onnx_model.graph.initializer:
@@ -68,6 +79,7 @@ class RLValidationModule(BaseValidationModule):
 
         print(f"Model parameters: {total_params}")
 
+        # ort.InferenceSession will also look for .onnx.data in the same directory
         session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
         print(f"Loaded ONNX model from {model_path}")
         return session
