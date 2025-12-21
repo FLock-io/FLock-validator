@@ -1,14 +1,18 @@
 from abc import ABC, abstractmethod
 from pydantic import BaseModel
 
+
 class BaseConfig(BaseModel, frozen=True):
     pass
+
 
 class BaseInputData(BaseModel, frozen=True):
     pass
 
+
 class BaseMetrics(BaseModel, frozen=True):
     pass
+
 
 class BaseValidationModule(ABC):
     config_schema: type[BaseConfig]
@@ -18,17 +22,13 @@ class BaseValidationModule(ABC):
 
     @abstractmethod
     def __init__(self, config: BaseConfig, **kwargs):
-        """
+        """.
         Perform any global, one-time setup needed for this module.
         """
         pass
 
     @abstractmethod
-    def validate(
-        self,
-        data: BaseInputData,
-        **kwargs
-    ) -> BaseMetrics:
+    def validate(self, data: BaseInputData, **kwargs) -> BaseMetrics:
         """
         Download/prep the repo/revision, run validation, and return metrics parsed into a Pydantic model.
         """
