@@ -47,22 +47,36 @@ def install_in_env(env_name: str, packages: List[str]):
     """Install additional packages into an existing conda environment."""
     run_command(["conda", "install", "-y", "-n", env_name] + packages)
 
-def run_in_env(env_name: str, command: List[str], env_vars: Optional[dict] = None):
+def run_in_env(env_name: str, command: List[str], env_vars: Optional[dict] = None, no_capture_output: bool = False):
     """Run a command inside a conda environment."""
     logger.info(f"Running command {command} in environment {env_name}")
-    cmd = ["conda", "run", "-n", env_name] + command
-    run_command(cmd, env=env_vars)
+    cmd = ["conda", "run"]
+    if no_capture_output:
+        cmd.append("--no-capture-output")
+    cmd.extend(["-n", env_name] + command)
+    
+    try:
+        run_command(cmd, env=env_vars)
+    except subprocess.CalledProcessError as e:
+        # If --no-capture-output flag caused the error (micromamba compatibility), retry without it
+        if no_capture_output and e.returncode == 2:
+            logger.warning("--no-capture-output not supported, retrying without it")
+            cmd_without_flag = ["conda", "run", "-n", env_name] + command
+            run_command(cmd_without_flag, env=env_vars)
+        else:
+            raise
 
 def ensure_env_and_run(
     env_name: str,
     env_yml: Path,
     requirements_txt: Path,
     command: List[str],
-    env_vars: Optional[dict] = None
+    env_vars: Optional[dict] = None,
+    no_capture_output: bool = False
 ):
     """Ensure the environment exists, create if needed, then run the command."""
     if not env_exists(env_name):
         create_env(env_name, env_yml, requirements_txt)
     else:
         update_env(env_name, env_yml, requirements_txt)
-    run_in_env(env_name, command, env_vars)
+    run_in_env(env_name, command, env_vars, no_capture_output=no_capture_output)
