@@ -1,56 +1,53 @@
 import os
-import time
 import re
 import random
 import json
-import requests
 import httpx
+import torch
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
-from typing import List, Optional, Dict, Any
-from .prompt import get_prompt
+from huggingface_hub import HfApi
 from pydantic import BaseModel
-from validator.exceptions import RecoverableException
+from typing import List, Optional, Dict, Any
+from validator.modules.llm_judge.prompt import get_prompt
+from validator.modules.llm_judge.utils import download_file
+from validator.exceptions import LLMJudgeException, InvalidModelParametersException
+from validator.modules.llm_judge.template import template_dict
+from peft import PeftModel
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from validator.modules.base import (
     BaseValidationModule,
     BaseConfig,
     BaseInputData,
     BaseMetrics,
 )
-from peft import PeftModel
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import torch
-from loguru import logger
-from .template import template_dict
 
-
-class LLMJudgeException(RecoverableException):
-
-    pass
+api = HfApi()
+LOWEST_POSSIBLE_SCORE = -999
 
 
 class LLMJudgeConfig(BaseConfig):
     gen_batch_size: int = 1
     eval_batch_size: int = 10
+    gen_temperature: float = 0.7
 
 
 class LLMJudgeMetrics(BaseMetrics):
     score: float  # LLM output score as the main metric
-    confidence: Optional[float] = None  # Optional confidence measure
-    reasoning: Optional[str] = None  # Optional reasoning from LLM
 
 
 class LLMJudgeInputData(BaseInputData):
-    model_name_or_path: str
-    task_id: int
-    test_data_url: str
-    evaluation_arg_url: str
-    model_template: Optional[str] = "default"
-    base_model: Optional[str] = None  # For LoRA-adapted models
+    """Input data for LLMJudge"""
+    hg_repo_id: str
+    revision: str
+    context_length: int
+    max_params: int
+    validation_set_url: str
+    base_model: str
+    eval_args: dict
 
 
 class LLMJudgeValidationModule(BaseValidationModule):
-
     config_schema = LLMJudgeConfig
     metrics_schema = LLMJudgeMetrics
     input_data_schema = LLMJudgeInputData
@@ -61,8 +58,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         self.config = config
         self.client = None
         self.available_models = []
-        self.hf_model = None
-        self.hf_tokenizer = None
+
         # Initialize client and get available models
         self._initialize_client()
         self._fetch_available_models()
@@ -95,73 +91,79 @@ class LLMJudgeValidationModule(BaseValidationModule):
             )
             self.available_models = ["gpt-4o"]
 
-    def _load_hf_model(self, model_name_or_path: str, base_model: str = ""):
+    def _download_lora_config(self, repo_id: str, revision: str) -> bool:
         try:
-            # Clear CUDA cache before loading
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            if base_model:
-                # Load LoRA-adapted model
-                self.hf_tokenizer = AutoTokenizer.from_pretrained(
-                    base_model, trust_remote_code=True, use_fast=True
-                )
-                base_hf_model = AutoModelForCausalLM.from_pretrained(
-                    base_model,
-                    torch_dtype=(
-                        torch.float16 if torch.cuda.is_available() else torch.float32
-                    ),
-                    device_map="auto" if torch.cuda.is_available() else None,
-                    trust_remote_code=True,
-                    low_cpu_mem_usage=True,
-                )
-                self.hf_model = PeftModel.from_pretrained(
-                    base_hf_model,
-                    model_name_or_path,
-                    torch_dtype=(
-                        torch.float16 if torch.cuda.is_available() else torch.float32
-                    ),
-                    device_map="auto" if torch.cuda.is_available() else None,
-                    trust_remote_code=True,
-                )
-            else:
-                self.hf_tokenizer = AutoTokenizer.from_pretrained(
-                    model_name_or_path, trust_remote_code=True, use_fast=True
-                )
-                self.hf_model = AutoModelForCausalLM.from_pretrained(
-                    model_name_or_path,
-                    torch_dtype=(
-                        torch.float16 if torch.cuda.is_available() else torch.float32
-                    ),
-                    device_map="auto" if torch.cuda.is_available() else None,
-                    trust_remote_code=True,
-                    low_cpu_mem_usage=True,
-                )
-
-            # Add padding token if it doesn't exist
-            if self.hf_tokenizer.pad_token is None:
-                self.hf_tokenizer.pad_token = self.hf_tokenizer.eos_token
-
-            # Set model to evaluation mode
-            self.hf_model.eval()
-
+            api.hf_hub_download(
+                repo_id=repo_id,
+                filename="adapter_config.json",
+                local_dir="judge",
+                revision=revision,
+            )
         except Exception as e:
-            # Clean up on failure
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            raise LLMJudgeException(
-                f"Failed to load HuggingFace model {model_name_or_path}: {e}"
-            ) from e
+            if "adapter_config.json" in str(e):
+                print("No adapter_config.json found in the repo, assuming full model")
+                return False
+            else:
+                raise  # Re-raise the exception if it's not related to the missing file
+        return True
+
+    def _load_model(self, repo_id: str, revision: str = "main", max_params: int = None):
+
+        is_lora = self._download_lora_config(repo_id, revision=revision)
+        model_kwargs = dict(
+            trust_remote_code=True,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            use_cache=False,
+            device_map=None,
+        )
+        if is_lora:
+            api.snapshot_download(
+                repo_id=repo_id,
+                local_dir="judge",
+                revision=revision,
+            )
+            with open("judge/adapter_config.json", "r") as f:
+                adapter_config = json.load(f)
+            base_model = adapter_config["base_model_name_or_path"]
+            self.hf_tokenizer = AutoTokenizer.from_pretrained(
+                base_model, trust_remote_code=True, use_fast=True
+            )
+            base_hf_model = AutoModelForCausalLM.from_pretrained(base_model, **model_kwargs)
+            hf_model = PeftModel.from_pretrained(
+                base_hf_model,
+                "judge",
+                device_map=None,
+            )
+            self.hf_model = hf_model.merge_and_unload()
+        else:
+            self.hf_tokenizer = AutoTokenizer.from_pretrained(
+                repo_id, trust_remote_code=True, use_fast=True
+            )
+            self.hf_model = AutoModelForCausalLM.from_pretrained(
+                repo_id,
+                torch_dtype=(
+                    torch.float16 if torch.cuda.is_available() else torch.float32
+                ),
+                device_map=None,
+                trust_remote_code=True,
+                low_cpu_mem_usage=True,
+            )
+        total = sum(p.numel() for p in self.hf_model.parameters())
+        if total > max_params:
+            print(
+                f"Total model params: {total} exceeds the limit {max_params}, submitting validation result with a large loss"
+            )
+            raise InvalidModelParametersException(f"Model parameters {total} exceed limit {max_params}")
 
     def _construct_conversation_template(
-        self, conversation: List[Dict[str, str]], model_template: str
+            self, conversation: List[Dict[str, str]], base_model: str, max_seq_length: int,
     ) -> str:
         try:
-            if model_template not in template_dict:
-                logger.warning(f"Template {model_template} not found, using default")
-                model_template = "default"
+            if base_model not in template_dict:
+                print(f"Template {base_model} not found, using default")
+                base_model = "default"
 
-            template = template_dict[model_template]
+            template = template_dict[base_model]
 
             conversation_parts = []
 
@@ -195,6 +197,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                         conversation_parts.append(assistant_text)
 
             conversation_format = "".join(conversation_parts)
+            conversation_format = conversation_format[:max_seq_length]
         except Exception as e:
             raise LLMJudgeException(
                 f"Failed to construct conversation template: {e}"
@@ -203,14 +206,16 @@ class LLMJudgeValidationModule(BaseValidationModule):
         return conversation_format
 
     def _generate_response(
-        self,
-        user_input: list = list[
-            list[dict[str, str]]
-        ],  # list of conversations, each conversation is a list of messages
-        model_template: str = "default",
-        max_length: int = 2048,
-        batch_size: int = 1,
-        eval_args: dict = None,
+            self,
+            context_length: int,
+            user_input: list = list[
+                list[dict[str, str]]
+            ],  # list of conversations, each conversation is a list of messages
+            base_model: str = "default",
+            max_length: int = 2048,
+            batch_size: int = 1,
+            eval_args: dict = None,
+
     ) -> str:
         if self.hf_model is None or self.hf_tokenizer is None:
             raise LLMJudgeException("HuggingFace model not loaded")
@@ -218,13 +223,13 @@ class LLMJudgeValidationModule(BaseValidationModule):
         try:
             results = []
             for i in range(0, len(user_input), batch_size):
-                batch_conversations = user_input[i : i + batch_size]
+                batch_conversations = user_input[i: i + batch_size]
 
                 # Apply chat template with fallback
                 batch_conversation_templates = []
                 for conversation in batch_conversations:
                     template = self._construct_conversation_template(
-                        conversation, model_template=model_template
+                        conversation, base_model=base_model, max_seq_length=context_length
                     )
 
                     batch_conversation_templates.append(template)
@@ -238,8 +243,8 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
                 # Move to device if available
                 if (
-                    torch.cuda.is_available()
-                    and next(self.hf_model.parameters()).is_cuda
+                        torch.cuda.is_available()
+                        and next(self.hf_model.parameters()).is_cuda
                 ):
                     model_inputs = {k: v.cuda() for k, v in model_inputs.items()}
 
@@ -247,7 +252,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     outputs = self.hf_model.generate(
                         **model_inputs,
                         max_new_tokens=max_length,
-                        temperature=eval_args.get("gen_temperature", 0.7),
+                        temperature=self.config.gen_temperature,
                         do_sample=True,
                         pad_token_id=self.hf_tokenizer.eos_token_id,
                         eos_token_id=self.hf_tokenizer.eos_token_id,
@@ -266,7 +271,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
                     results.append(assistant_response)
                     # print("assistant_response:", assistant_response)
-                print(f"Generated batch of size {i+batch_size}/{len(user_input)}")
+                print(f"Generated batch of size {i + batch_size}/{len(user_input)}")
 
             return results
 
@@ -295,7 +300,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         return selected_model
 
     def _normalize_score(
-        self, score: float, min_score: float = 1.0, max_score: float = 10.0
+            self, score: float, min_score: float = 1.0, max_score: float = 10.0
     ) -> float:
         """
         Normalize score to (0, 1) range
@@ -320,7 +325,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         return normalized
 
     def _call_gpt(
-        self, messages: List[Dict[str, str]], eval_args: dict
+            self, messages: List[Dict[str, str]], eval_args: dict
     ) -> tuple[str, str]:
         """
         Call GPT API with model and temperature from eval_args
@@ -352,125 +357,87 @@ class LLMJudgeValidationModule(BaseValidationModule):
         except Exception as e:
             raise LLMJudgeException(f"API call failed with model {selected_model}: {e}")
 
-    def _load_data_and_args(
-        self, data_url: str, evaluation_arg_url: str
-    ) -> tuple[str, dict]:
-        # Load test data
-        response = requests.get(data_url)
-        response.raise_for_status()
-        test_data = response.text
-
-        # Load evaluation arguments
-        eval_args = {}
-        if evaluation_arg_url:
-            try:
-                eval_response = requests.get(evaluation_arg_url)
-                eval_response.raise_for_status()
-                eval_args = json.loads(eval_response.text)
-                print(f"Loaded evaluation arguments: {eval_args}")
-            except Exception as e:
-                print(
-                    f"Warning: Failed to load evaluation arguments from {evaluation_arg_url}: {e}"
-                )
-
-        return test_data, eval_args
-
     def _load_jsonl_conversations(
-        self,
-        model_name_or_path: str,
-        model_template: str,
-        data_url: str,
-        evaluation_arg_url: str,
-        base_model: Optional[str] = None,
+            self,
+            base_model: str,
+            test_file: str,
+            eval_args: dict,
+            context_length: int
     ) -> List[Dict[str, Any]]:
-        """
-        Load test data and generate conversations using HuggingFace model
-
-        Args:
-            model_name_or_path: HuggingFace model to use for generation
-            model_template: Template name for conversation formatting
-            data_url: URL to JSONL file containing user inputs
-            evaluation_arg_url: URL to evaluation arguments/criteria
-
-        Returns:
-            List of generated conversations
-        """
-        # Load the HuggingFace model
-        if self.hf_model is None:
-            self._load_hf_model(model_name_or_path, base_model or "")
-
-        # Load data and arguments
-        test_data, eval_args = self._load_data_and_args(data_url, evaluation_arg_url)
 
         # Extract parameters from eval_args
         max_gen_try = eval_args.get("max_gen_try", 1)  # Default max generation tries
 
         # Parse all input conversations first
         input_conversations = []
-        for line_num, line in enumerate(test_data.strip().split("\n"), 1):
-            if line.strip():
-                try:
-                    json_data = json.loads(line)
+        import json
 
-                    # Extract system information if available
-                    system_text = json_data.get("system", None)
-                    input_conversations_data = {
-                        "system": system_text,
-                        "conversations": [],
-                    }
+        # TODO: NEED FIX BIG DATASET
+        with open(test_file, "r", encoding="utf-8") as f:
+            test_data = [json.loads(line) for line in f if line.strip()]
 
-                    # Extract conversation history for multi-turn support
-                    conversation_to_process = []
-                    reference_response = None
+        for line_num, json_data in enumerate(test_data):
 
-                    if "conversations" in json_data:
-                        conversations = json_data["conversations"]
-                        if isinstance(conversations, list) and conversations:
-                            # Filter valid messages
-                            for msg in conversations:
-                                role = msg.get("role", "")
-                                content = msg.get("content", "").strip()
-                                if role in ["user", "assistant"] and content:
-                                    conversation_to_process.append(
-                                        {"role": role, "content": content}
-                                    )
+            try:
+                # Extract system information if available
+                system_text = json_data.get("system", None)
+                input_conversations_data = {
+                    "system": system_text,
+                    "conversations": [],
+                }
 
-                            # Extract reference response (last assistant message) if it exists
-                            reference_response = None
-                            if (
+                # Extract conversation history for multi-turn support
+                conversation_to_process = []
+                reference_response = None
+
+                if "conversations" in json_data:
+                    conversations = json_data["conversations"]
+                    if isinstance(conversations, list) and conversations:
+                        # Filter valid messages
+                        for msg in conversations:
+                            role = msg.get("role", "")
+                            content = msg.get("content", "").strip()
+                            if role in ["user", "assistant"] and content:
+                                conversation_to_process.append(
+                                    {"role": role, "content": content}
+                                )
+
+                        # Extract reference response (last assistant message) if it exists
+                        reference_response = None
+                        if (
                                 conversation_to_process
                                 and conversation_to_process[-1]["role"] == "assistant"
-                            ):
-                                reference_response = conversation_to_process[-1]["content"]
-                                conversation_to_process = conversation_to_process[:-1]
+                        ):
+                            reference_response = conversation_to_process[-1]["content"]
+                            conversation_to_process = conversation_to_process[:-1]
 
-                    # If no conversations found, try to extract from "user" field
-                    if not conversation_to_process:
-                        user_input = json_data.get("user", "").strip()
-                        if user_input:
-                            conversation_to_process = [
-                                {"role": "user", "content": user_input}
-                            ]
+                # If no conversations found, try to extract from "user" field
+                if not conversation_to_process:
+                    user_input = json_data.get("user", "").strip()
+                    if user_input:
+                        conversation_to_process = [
+                            {"role": "user", "content": user_input}
+                        ]
 
-                    if not conversation_to_process:
-                        print(
-                            f"Warning: No user input found in line {line_num}, skipping"
-                        )
-                        continue
-
-                    input_conversations_data["conversations"] = conversation_to_process
-
-                    input_conversations.append(
-                        {
-                            "conversation": input_conversations_data,
-                            "line_num": line_num,
-                            "reference": reference_response,
-                        }
+                if not conversation_to_process:
+                    print(
+                        f"Warning: No user input found in line {line_num}, skipping"
                     )
-
-                except json.JSONDecodeError:
-                    print(f"Warning: Invalid JSON on line {line_num}, skipping")
                     continue
+
+                input_conversations_data["conversations"] = conversation_to_process
+
+                input_conversations.append(
+                    {
+                        "conversation": input_conversations_data,
+                        "line_num": line_num,
+                        "reference": reference_response,
+                    }
+                )
+
+            except json.JSONDecodeError:
+                print(f"Warning: Invalid JSON on line {line_num}, skipping")
+                continue
 
         if not input_conversations:
             raise LLMJudgeException("No valid conversations were found")
@@ -483,28 +450,28 @@ class LLMJudgeValidationModule(BaseValidationModule):
             batch_conversations = [item["conversation"] for item in input_conversations]
 
             # Generate responses using batch processing
-            batch_size = eval_args.get("batch_size", self.config.gen_batch_size)
             assistant_responses = self._generate_response(
                 user_input=batch_conversations,
-                model_template=model_template,
-                batch_size=batch_size,
+                base_model=base_model,
+                batch_size=self.config.gen_batch_size,
                 eval_args=eval_args,
+                context_length=context_length,
             )
 
             # Create conversation structures for this generation
             for input_item, assistant_response in zip(
-                input_conversations, assistant_responses
+                    input_conversations, assistant_responses
             ):
                 # Create final conversation with assistant response
                 final_conversations = (
-                    [
-                        {
-                            "role": "system",
-                            "content": input_item["conversation"]["system"],
-                        }
-                    ]
-                    + input_item["conversation"]["conversations"]
-                    + [{"role": "assistant", "content": assistant_response}]
+                        [
+                            {
+                                "role": "system",
+                                "content": input_item["conversation"]["system"],
+                            }
+                        ]
+                        + input_item["conversation"]["conversations"]
+                        + [{"role": "assistant", "content": assistant_response}]
                 )
 
                 # Create conversation structure for this generation
@@ -545,15 +512,15 @@ class LLMJudgeValidationModule(BaseValidationModule):
         return "\n\n".join(formatted_parts)
 
     def _construct_evaluation_prompt(
-        self, conversation_context: str, task_id: int, reference: str = None
+            self, conversation_context: str, prompt_id: int, reference: str = None
     ) -> List[Dict[str, str]]:
         """Construct evaluation prompt for a single conversation"""
         try:
-            if reference and task_id == 2:
+            if reference and prompt_id == 2:
                 # Use reference evaluation prompt
-                user_message = get_prompt(task_id, conversation_context, reference)
+                user_message = get_prompt(prompt_id, conversation_context, reference)
             else:
-                user_message = get_prompt(task_id, conversation_context)
+                user_message = get_prompt(prompt_id, conversation_context)
         except ValueError as e:
             user_message = get_prompt(1, conversation_context)
             print(f"Warning: {e}. Using default prompt.")
@@ -586,19 +553,18 @@ class LLMJudgeValidationModule(BaseValidationModule):
             return result
 
     def _evaluate_single_conversation(
-        self,
-        conversation_data: Dict[str, Any],
-        task_id: int,
-        eval_args: dict,
-        max_eval_try: int,
-        conv_idx: int,
+            self,
+            conversation_data: Dict[str, Any],
+            eval_args: dict,
+            max_eval_try: int,
+            conv_idx: int,
     ) -> Dict[str, Any]:
         """
         Simplified version: evaluate a single conversation and return scores, confidences, and reasoning
         """
         conversation_context = self._format_single_conversation(conversation_data)
         reference = conversation_data.get("reference")
-        messages = self._construct_evaluation_prompt(conversation_context, task_id, reference)
+        messages = self._construct_evaluation_prompt(conversation_context, eval_args.get("prompt_id", 0), reference)
 
         conv_scores = []
         conv_confidences = []
@@ -639,38 +605,31 @@ class LLMJudgeValidationModule(BaseValidationModule):
         }
 
     def validate(self, data: LLMJudgeInputData, **kwargs) -> LLMJudgeMetrics:
-        """
-        Validate using LLM as a judge with multiple tries and random model selection
-        Uses two-stage approach: first generate all responses, then parallel evaluation
+        eval_file = download_file(data.validation_set_url)
 
-        Args:
-            data: Input data containing evaluation prompt and context
-            **kwargs: Additional arguments
-
-        Returns:
-            LLMJudgeMetrics: Metrics containing the averaged LLM evaluation score across all conversations
-        """
-        _ = kwargs
+        try:
+            self._load_model(data.hg_repo_id, data.revision, data.max_params)
+        except InvalidModelParametersException as e:
+            # lowest possible reward for invalid model parameters
+            print(f"Invalid model parameters: {e}")
+            return LLMJudgeMetrics(score=LOWEST_POSSIBLE_SCORE)
 
         # Stage 1: Generate all responses
         print("Stage 1: Generating all conversations for evaluation...")
         all_conversations = self._load_jsonl_conversations(
-            data.model_name_or_path,
-            data.model_template,
-            data.test_data_url,
-            data.evaluation_arg_url,
             data.base_model,
+            eval_file,
+            data.eval_args,
+            data.context_length
         )
 
         # Load evaluation arguments
-        _, eval_args = self._load_data_and_args(
-            data.test_data_url, data.evaluation_arg_url
-        )
-        max_eval_try = eval_args.get("max_eval_try", 3)  # Default max evaluation tries
+
+        max_eval_try = data.eval_args.get("max_eval_try", 3)  # Default max evaluation tries
         eval_batch_size = self.config.eval_batch_size
 
         # Calculate total evaluation calls
-        eval_model_list = eval_args.get("eval_model_list", [])
+        eval_model_list = data.eval_args.get("eval_model_list", [])
         available_eval_models = [
             model for model in eval_model_list if model in self.available_models
         ]
@@ -678,7 +637,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             available_eval_models = self.available_models
 
         total_eval_calls = (
-            len(all_conversations) * len(available_eval_models) * max_eval_try
+                len(all_conversations) * len(available_eval_models) * max_eval_try
         )
 
         # Stage 2: Direct parallel evaluation of all conversations
@@ -693,8 +652,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             evaluation_tasks.append(
                 (
                     conversation_data,
-                    data.task_id,
-                    eval_args,
+                    data.eval_args,
                     max_eval_try,
                     idx,  # conversation index
                 )
@@ -755,11 +713,9 @@ class LLMJudgeValidationModule(BaseValidationModule):
         # Normalize the final score to (0, 1) range
         overall_avg_score = self._normalize_score(raw_avg_score)
         print(f"Overall normalized score (0-1 range): {overall_avg_score:.4f}")
-
+        score_finally = overall_avg_score * overall_avg_confidence
         return LLMJudgeMetrics(
-            score=overall_avg_score,
-            confidence=overall_avg_confidence,
-            reasoning=combined_reasoning,
+            score=score_finally
         )
 
     def cleanup(self):

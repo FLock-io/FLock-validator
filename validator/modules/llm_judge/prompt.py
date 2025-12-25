@@ -4,26 +4,25 @@ from typing import Dict, Callable, Any
 _PROMPT_REGISTRY: Dict[int, Callable[[Any], str]] = {}
 
 
-def register(task_id: int):
+def register(prompt_id: int):
 
     def decorator(func: Callable[[Any], str]):
-        _PROMPT_REGISTRY[task_id] = func
+        _PROMPT_REGISTRY[prompt_id] = func
         return func
 
     return decorator
 
 
-def get_prompt(task_id: int, data: str, reference: str = None) -> str:
+def get_prompt(prompt_id: int, data: str, reference: str = None) -> str:
     """
-    Get the registered prompt for a given task_id
+    Get the registered prompt for a given prompt_id
     """
-    if task_id not in _PROMPT_REGISTRY:
-        raise ValueError(f"No prompt registered for task_id {task_id}")
+    if prompt_id not in _PROMPT_REGISTRY:
+        raise ValueError(f"No prompt registered for prompt_id {prompt_id}")
 
-    prompt_func = _PROMPT_REGISTRY[task_id]
+    prompt_func = _PROMPT_REGISTRY[prompt_id]
 
-    # For reference evaluation (task_id=2), pass the reference parameter
-    if task_id == 2 and reference:
+    if prompt_id == 2 and reference:
         return prompt_func(data, reference)
     else:
         return prompt_func(data)
@@ -33,7 +32,7 @@ def list_registered_tasks() -> list[int]:
     return list(_PROMPT_REGISTRY.keys())
 
 
-@register(task_id=1)
+@register(prompt_id=1)
 def default_evaluation_prompt(context: str):
     evaluation_criteria = """The AI assistant has been provided with a conversation history (including prior user queries and assistant replies) as well as system-level instructions. It then generates a final response to the last user query.
     
@@ -67,7 +66,7 @@ def default_evaluation_prompt(context: str):
     return evaluation_criteria.format(conversation_context=context)
 
 
-@register(task_id=2)
+@register(prompt_id=2)
 def reference_evalulation_prompt(context: str, reference: str):
     evaluation_criteria = """The AI assistant has been provided with a conversation history (including prior user queries and assistant replies) as well as system-level instructions. It then generates a final response to the last user query.
     
