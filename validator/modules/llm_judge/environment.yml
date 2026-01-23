@@ -10,3 +10,4 @@ dependencies:
     - torch>=1.12.0  # PyTorch for model inference
     - accelerate>=0.20.0  # For efficient model loading
     - loguru>=0.6.0  # Logging library
+    - tenacity

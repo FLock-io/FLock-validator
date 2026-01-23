@@ -216,7 +216,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             batch_size: int = 1,
             eval_args: dict = None,
 
-    ) -> str:
+    ) -> list:
         if self.hf_model is None or self.hf_tokenizer is None:
             raise LLMJudgeException("HuggingFace model not loaded")
 
