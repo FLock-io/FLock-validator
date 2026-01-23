@@ -6,6 +6,7 @@ import httpx
 import torch
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
+from loguru import logger
 from huggingface_hub import HfApi
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -86,7 +87,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
         except Exception as e:
             # Fallback to common models if API call fails
-            print(
+            logger.error(
                 f"Warning: Failed to fetch models from API ({e}), using fallback models"
             )
             self.available_models = ["gpt-4o"]
@@ -101,7 +102,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             )
         except Exception as e:
             if "adapter_config.json" in str(e):
-                print("No adapter_config.json found in the repo, assuming full model")
+                logger.error("No adapter_config.json found in the repo, assuming full model")
                 return False
             else:
                 raise  # Re-raise the exception if it's not related to the missing file
@@ -150,7 +151,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             )
         total = sum(p.numel() for p in self.hf_model.parameters())
         if total > max_params:
-            print(
+            logger.info(
                 f"Total model params: {total} exceeds the limit {max_params}, submitting validation result with a large loss"
             )
             raise InvalidModelParametersException(f"Model parameters {total} exceed limit {max_params}")
@@ -160,7 +161,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
     ) -> str:
         try:
             if base_model not in template_dict:
-                print(f"Template {base_model} not found, using default")
+                logger.info(f"Template {base_model} not found, using default")
                 base_model = "default"
 
             template = template_dict[base_model]
@@ -271,7 +272,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
                     results.append(assistant_response)
                     # print("assistant_response:", assistant_response)
-                print(f"Generated batch of size {i + batch_size}/{len(user_input)}")
+                logger.info(f"Generated batch of size {i + batch_size}/{len(user_input)}")
 
             return results
 
@@ -292,7 +293,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
             if len(available_eval_models) == len(eval_model_list):
                 selected_model = random.choice(eval_model_list)
-                print(f"Using eval_model_list: selected {selected_model}")
+                logger.info(f"Using eval_model_list: selected {selected_model}")
                 return selected_model
 
         # random selection from available models
@@ -420,7 +421,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                         ]
 
                 if not conversation_to_process:
-                    print(
+                    logger.warning(
                         f"Warning: No user input found in line {line_num}, skipping"
                     )
                     continue
@@ -436,7 +437,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 )
 
             except json.JSONDecodeError:
-                print(f"Warning: Invalid JSON on line {line_num}, skipping")
+                logger.warning(f"Warning: Invalid JSON on line {line_num}, skipping")
                 continue
 
         if not input_conversations:
@@ -523,7 +524,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 user_message = get_prompt(prompt_id, conversation_context)
         except ValueError as e:
             user_message = get_prompt(1, conversation_context)
-            print(f"Warning: {e}. Using default prompt.")
+            logger.warning(f"Warning: {e}. Using default prompt.")
 
         system_prompt = """You are a fair judge, please output the score, confidence, and reasoning for the given conversation."""
         return [
@@ -549,7 +550,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
                 return result
         except (json.JSONDecodeError, ValueError, KeyError) as e:
-            print(f"Failed to parse JSON response: {e}")
+            logger.error(f"Failed to parse JSON response: {e}")
             return result
 
     def _evaluate_single_conversation(
@@ -611,11 +612,11 @@ class LLMJudgeValidationModule(BaseValidationModule):
             self._load_model(data.hg_repo_id, data.revision, data.max_params)
         except InvalidModelParametersException as e:
             # lowest possible reward for invalid model parameters
-            print(f"Invalid model parameters: {e}")
+            logger.info(f"Invalid model parameters: {e}")
             return LLMJudgeMetrics(score=LOWEST_POSSIBLE_SCORE)
 
         # Stage 1: Generate all responses
-        print("Stage 1: Generating all conversations for evaluation...")
+        logger.info("Stage 1: Generating all conversations for evaluation...")
         all_conversations = self._load_jsonl_conversations(
             data.base_model,
             eval_file,
@@ -641,7 +642,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         )
 
         # Stage 2: Direct parallel evaluation of all conversations
-        print(
+        logger.info(
             f"Stage 2: Evaluating {len(all_conversations)} conversations with {len(available_eval_models)} models, "
             f"{max_eval_try} tries each = {total_eval_calls} total evaluations using {eval_batch_size} workers..."
         )
@@ -677,7 +678,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     result = future.result()
                     evaluation_results.append(result)
                 except Exception as e:
-                    print(f"Evaluation task failed: {e}")
+                    logger.error(f"Evaluation task failed: {e}")
                     # Add default result for failed tasks
                     evaluation_results.append(
                         {
@@ -712,7 +713,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
         # Normalize the final score to (0, 1) range
         overall_avg_score = self._normalize_score(raw_avg_score)
-        print(f"Overall normalized score (0-1 range): {overall_avg_score:.4f}")
+        logger.info(f"Overall normalized score (0-1 range): {overall_avg_score:.4f}")
         score_finally = overall_avg_score * overall_avg_confidence
         return LLMJudgeMetrics(
             score=score_finally
