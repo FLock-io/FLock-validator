@@ -1,4 +1,3 @@
-from pydantic import BaseModel
 from validator.exceptions import RecoverableException
 from validator.modules.base import BaseValidationModule, BaseConfig, BaseInputData, BaseMetrics
 

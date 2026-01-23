@@ -1,6 +1,6 @@
 name: llm_judge
 dependencies:
-  - python>=3.8
+  - python==3.10
   - pip
   - pip:
     - openai>=1.0.0  # OpenAI API client
