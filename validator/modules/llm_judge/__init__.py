@@ -77,7 +77,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             )
 
         except Exception as e:
-            raise LLMJudgeException(f"Failed to initialize OpenAI client: {e}") from e
+            raise LLMJudgeException(f"OPENAI_API_KEY and OPENAI_BASE_URL are not set in the environment variables: {e}") from e
 
     def _fetch_available_models(self):
         try:
