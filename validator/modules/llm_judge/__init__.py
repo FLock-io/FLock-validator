@@ -115,7 +115,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             trust_remote_code=True,
             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             use_cache=False,
-            device_map=None,
+            device_map="auto",
         )
         if is_lora:
             api.snapshot_download(
@@ -133,7 +133,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             hf_model = PeftModel.from_pretrained(
                 base_hf_model,
                 "judge",
-                device_map=None,
+                device_map="auto",
             )
             self.hf_model = hf_model.merge_and_unload()
         else:
