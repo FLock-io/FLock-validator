@@ -367,7 +367,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
     ) -> List[Dict[str, Any]]:
 
         # Extract parameters from eval_args
-        max_gen_try = eval_args.get("max_gen_try", 1)  # Default max generation tries
+        max_gen_try = eval_args.get("gen_require", 1)  # Default max generation tries
 
         # Parse all input conversations first
         input_conversations = []
@@ -626,7 +626,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
         # Load evaluation arguments
 
-        max_eval_try = data.eval_args.get("max_eval_try", 3)  # Default max evaluation tries
+        max_eval_try = data.eval_args.get("eval_require", 3)  # Default max evaluation tries
         eval_batch_size = self.config.eval_batch_size
 
         # Calculate total evaluation calls
