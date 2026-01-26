@@ -371,9 +371,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
         # Parse all input conversations first
         input_conversations = []
-        import json
 
-        # TODO: NEED FIX BIG DATASET
         with open(test_file, "r", encoding="utf-8") as f:
             test_data = [json.loads(line) for line in f if line.strip()]
 
