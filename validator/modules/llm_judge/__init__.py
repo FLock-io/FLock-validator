@@ -157,7 +157,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             raise InvalidModelParametersException(f"Model parameters {total} exceed limit {max_params}")
 
     def _construct_conversation_template(
-            self, conversation: List[Dict[str, str]], base_model: str, max_seq_length: int,
+            self, conversation: List[Dict[str, str]], base_model: str,
     ) -> str:
         try:
             if base_model not in template_dict:
@@ -198,7 +198,6 @@ class LLMJudgeValidationModule(BaseValidationModule):
                         conversation_parts.append(assistant_text)
 
             conversation_format = "".join(conversation_parts)
-            conversation_format = conversation_format[:max_seq_length]
         except Exception as e:
             raise LLMJudgeException(
                 f"Failed to construct conversation template: {e}"
@@ -230,7 +229,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 batch_conversation_templates = []
                 for conversation in batch_conversations:
                     template = self._construct_conversation_template(
-                        conversation, base_model=base_model, max_seq_length=context_length
+                        conversation, base_model=base_model,
                     )
 
                     batch_conversation_templates.append(template)
@@ -343,7 +342,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             selected_model = eval_args["selected_model"]
         else:
             selected_model = self._select_eval_model(eval_args)
-        temperature = eval_args.get("temperature", 0.3)  # Default eval temperature
+        temperature = eval_args.get("temperature", 0.1)  # Default eval temperature
 
         params = {
             "model": selected_model,
