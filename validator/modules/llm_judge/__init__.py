@@ -30,7 +30,7 @@ LOWEST_POSSIBLE_SCORE = -999
 class LLMJudgeConfig(BaseConfig):
     gen_batch_size: int = 1
     eval_batch_size: int = 10
-    gen_temperature: float = 0.7
+    gen_temperature: float = 0.1
 
 
 class LLMJudgeMetrics(BaseMetrics):
