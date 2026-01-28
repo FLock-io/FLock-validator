@@ -300,21 +300,19 @@ class LLMJudgeValidationModule(BaseValidationModule):
         return selected_model
 
     def _normalize_score(
-            self, score: float, min_score: float = 1.0, max_score: float = 10.0
+            self, score: float, min_score: float = 0, max_score: float = 10.0
     ) -> float:
         """
         Normalize score to (0, 1) range
 
         Args:
             score: Original score
-            min_score: Minimum possible score (default: 1.0)
+            min_score: Minimum possible score (default: 0.0)
             max_score: Maximum possible score (default: 10.0)
 
         Returns:
             Normalized score in (0, 1) range
         """
-        if max_score == min_score:
-            return 0.5  # Return middle value if range is zero
 
         # Normalize to [0, 1] range
         normalized = (score - min_score) / (max_score - min_score)
@@ -656,11 +654,6 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 )
             )
 
-        # Execute all evaluations in parallel
-        all_scores = []
-        all_confidences = []
-        all_reasoning = []
-
         with ThreadPoolExecutor(max_workers=eval_batch_size) as executor:
             # Submit all tasks
             future_to_task = {
@@ -685,33 +678,27 @@ class LLMJudgeValidationModule(BaseValidationModule):
                         }
                     )
 
+        # Execute all evaluations in parallel
+        all_weighted_scores = []
+        all_reasoning = []
         # Process all results
         for result in evaluation_results:
-            if result["scores"]:
-                # Average scores for this conversation across all models/tries
-                conv_avg_score = sum(result["scores"]) / len(result["scores"])
-                all_scores.append(conv_avg_score)
+            scores = result.get("scores", [])
+            confidences = result.get("confidences", [])
 
-            if result["confidences"]:
-                conv_avg_confidence = sum(result["confidences"]) / len(
-                    result["confidences"]
-                )
-                all_confidences.append(conv_avg_confidence)
-
-            if result["reasoning"]:
+            if scores and confidences:
+                for s, c in zip(scores, confidences):
+                    all_weighted_scores.append(s * c)
+            if result.get("reasoning"):
                 all_reasoning.extend(result["reasoning"])
 
         # Calculate overall averages across all conversations
-        raw_avg_score = sum(all_scores) / len(all_scores) if all_scores else 5.0
-        overall_avg_confidence = (
-            sum(all_confidences) / len(all_confidences) if all_confidences else None
-        )
+        raw_avg_score = sum(all_weighted_scores) / len(all_weighted_scores) if all_weighted_scores else 5.0
         combined_reasoning = "\n\n".join(all_reasoning) if all_reasoning else None
 
         # Normalize the final score to (0, 1) range
-        overall_avg_score = self._normalize_score(raw_avg_score)
-        logger.info(f"Overall normalized score (0-1 range): {overall_avg_score:.4f}")
-        score_finally = overall_avg_score * overall_avg_confidence
+        score_finally = self._normalize_score(raw_avg_score)
+        logger.info(f"Overall normalized score_finally (0-1 range): {score_finally:.4f}")
         return LLMJudgeMetrics(
             score=score_finally
         )
