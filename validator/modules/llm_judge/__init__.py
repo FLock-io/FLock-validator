@@ -401,7 +401,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         input_conversations = []
 
         with open(test_file, "r", encoding="utf-8") as f:
-            test_data = [json.loads(line) for line in f if line.strip()][:10]
+            test_data = [json.loads(line) for line in f if line.strip()]
 
         for line_num, json_data in enumerate(test_data):
 
