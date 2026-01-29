@@ -1,4 +1,6 @@
 name: llm_judge
+channels:
+  - conda-forge
 dependencies:
   - python==3.12
   - pip
@@ -12,3 +14,4 @@ dependencies:
     - loguru>=0.6.0  # Logging library
     - tenacity
     - peft>=0.10.0,<=0.13.2
+    - python-dotenv  # Load environment variables from .env file
