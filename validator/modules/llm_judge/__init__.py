@@ -4,12 +4,14 @@ import random
 import json
 import httpx
 import torch
+from tenacity import retry, stop_after_attempt, wait_exponential
+from pathlib import Path
+from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
 from loguru import logger
 from huggingface_hub import HfApi
-from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any
 from validator.modules.llm_judge.prompt import get_prompt
 from validator.modules.llm_judge.utils import download_file
 from validator.exceptions import LLMJudgeException, InvalidModelParametersException
@@ -23,13 +25,18 @@ from validator.modules.base import (
     BaseMetrics,
 )
 
+# Load environment variables from .env file
+env_path = Path(__file__).parent / ".env"
+if env_path.exists():
+    load_dotenv(env_path)
+
 api = HfApi()
 LOWEST_POSSIBLE_SCORE = -999
 
 
 class LLMJudgeConfig(BaseConfig):
     gen_batch_size: int = 1
-    eval_batch_size: int = 10
+    eval_batch_size: int = 16
     gen_temperature: float = 0.1
 
 
@@ -222,7 +229,8 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
         try:
             results = []
-            for i in range(0, len(user_input), batch_size):
+            total_batches = (len(user_input) + batch_size - 1) // batch_size
+            for batch_idx, i in enumerate(range(0, len(user_input), batch_size), 1):
                 batch_conversations = user_input[i: i + batch_size]
 
                 # Apply chat template with fallback
@@ -248,6 +256,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 ):
                     model_inputs = {k: v.cuda() for k, v in model_inputs.items()}
 
+                logger.info(f"Generating batch {batch_idx}/{total_batches} ({min(i + batch_size, len(user_input))}/{len(user_input)} conversations)...")
                 with torch.no_grad():
                     outputs = self.hf_model.generate(
                         **model_inputs,
@@ -271,8 +280,8 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
                     results.append(assistant_response)
                     # print("assistant_response:", assistant_response)
-                logger.info(f"Generated batch of size {i + batch_size}/{len(user_input)}")
 
+            logger.info(f"Completed generating all {len(user_input)} conversations")
             return results
 
         except Exception as e:
@@ -326,7 +335,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             self, messages: List[Dict[str, str]], eval_args: dict
     ) -> tuple[str, str]:
         """
-        Call GPT API with model and temperature from eval_args
+        Call GPT API with model and temperature from eval_args, with exponential backoff retry.
 
         Args:
             messages: Chat messages
@@ -342,6 +351,10 @@ class LLMJudgeValidationModule(BaseValidationModule):
             selected_model = self._select_eval_model(eval_args)
         temperature = eval_args.get("temperature", 0.1)  # Default eval temperature
 
+        # Patch: kimi-k2.5 requires temperature=1
+        if selected_model == "kimi-k2.5":
+            temperature = 1
+
         params = {
             "model": selected_model,
             "messages": messages,
@@ -349,11 +362,29 @@ class LLMJudgeValidationModule(BaseValidationModule):
             "seed": random.randint(0, 10000),
         }
 
-        try:
+        def log_retry(retry_state):
+            logger.warning(
+                f"API call failed (attempt {retry_state.attempt_number}/3), "
+                f"retrying in {retry_state.next_action.sleep:.1f}s: {retry_state.outcome.exception()}"
+            )
+
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=1, max=4),
+            before_sleep=log_retry,
+            reraise=True,
+        )
+        def _make_api_call():
             completion = self.client.chat.completions.create(**params)
-            return completion.choices[0].message.content, selected_model
+            return completion.choices[0].message.content
+
+        try:
+            content = _make_api_call()
+            return content, selected_model
         except Exception as e:
-            raise LLMJudgeException(f"API call failed with model {selected_model}: {e}")
+            raise LLMJudgeException(
+                f"API call failed with model {selected_model} after retries: {e}"
+            )
 
     def _load_jsonl_conversations(
             self,
@@ -370,7 +401,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         input_conversations = []
 
         with open(test_file, "r", encoding="utf-8") as f:
-            test_data = [json.loads(line) for line in f if line.strip()]
+            test_data = [json.loads(line) for line in f if line.strip()][:10]
 
         for line_num, json_data in enumerate(test_data):
 
@@ -442,6 +473,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
         # Generate responses for each input conversation
         for gen_try in range(max_gen_try):
+            logger.info(f"Generation attempt {gen_try + 1}/{max_gen_try} for {len(input_conversations)} conversations...")
             # Prepare batch of conversations for generation
             batch_conversations = [item["conversation"] for item in input_conversations]
 
@@ -527,7 +559,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             {"role": "system", "content": system_prompt},
         ]
 
-    def _parse_llm_response(self, response: str) -> Dict[str, Any]:
+    def _parse_llm_response(self, response: str, model_name: str = None) -> Dict[str, Any]:
         result = {"score": 5.0, "confidence": 0, "reasoning": None}
 
         try:
@@ -544,8 +576,18 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     result["reasoning"] = str(parsed_json["reasoning"])
 
                 return result
+            else:
+                # No JSON found in response
+                logger.error(
+                    f"Model '{model_name}' did not return valid JSON format. "
+                    f"Response: {response[:200]}..."
+                )
+                return result
         except (json.JSONDecodeError, ValueError, KeyError) as e:
-            logger.error(f"Failed to parse JSON response: {e}")
+            logger.error(
+                f"Model '{model_name}' returned malformed JSON: {e}. "
+                f"Response: {response[:200]}..."
+            )
             return result
 
     def _evaluate_single_conversation(
@@ -584,7 +626,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 model_eval_args["selected_model"] = model_name
 
                 response, selected_model = self._call_gpt(messages, model_eval_args)
-                parsed_result = self._parse_llm_response(response)
+                parsed_result = self._parse_llm_response(response, model_name=selected_model)
 
                 conv_scores.append(parsed_result["score"])
                 if parsed_result["confidence"] is not None:
@@ -661,14 +703,24 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 for task in evaluation_tasks
             }
 
-            # Collect results
+            # Collect results with progress tracking
             evaluation_results = []
+            completed_count = 0
+            total_tasks = len(evaluation_tasks)
+            
             for future in as_completed(future_to_task):
                 try:
                     result = future.result()
                     evaluation_results.append(result)
+                    completed_count += 1
+                    
+                    # Calculate progress
+                    evaluations_done = completed_count * len(available_eval_models) * max_eval_try
+                    progress_pct = (evaluations_done / total_eval_calls) * 100
+                    logger.info(f"Evaluation progress: {completed_count}/{total_tasks} conversations evaluated ({evaluations_done}/{total_eval_calls} LLM calls, {progress_pct:.1f}%)")
                 except Exception as e:
                     logger.error(f"Evaluation task failed: {e}")
+                    completed_count += 1
                     # Add default result for failed tasks
                     evaluation_results.append(
                         {
@@ -679,6 +731,8 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     )
 
         # Execute all evaluations in parallel
+        logger.info(f"Completed all {total_eval_calls} evaluation calls across {len(all_conversations)} conversations")
+        
         all_weighted_scores = []
         all_reasoning = []
         # Process all results
