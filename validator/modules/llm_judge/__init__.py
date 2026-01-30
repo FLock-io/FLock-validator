@@ -120,9 +120,22 @@ class LLMJudgeValidationModule(BaseValidationModule):
     def _load_model(self, repo_id: str, revision: str = "main", max_params: int = None):
 
         is_lora = self._download_lora_config(repo_id, revision=revision)
+        
+        # Determine best dtype: prefer BF16 for numerical stability, fallback to FP16
+        if torch.cuda.is_available():
+            if torch.cuda.is_bf16_supported():
+                compute_dtype = torch.bfloat16
+                logger.info("Using bfloat16 for better numerical stability")
+            else:
+                compute_dtype = torch.float16
+                logger.info("Using float16 (bfloat16 not supported on this GPU)")
+        else:
+            compute_dtype = torch.float32
+            logger.info("Using float32 (CPU mode)")
+        
         model_kwargs = dict(
             trust_remote_code=True,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            torch_dtype=compute_dtype,
             use_cache=False,
             device_map="auto",
         )
@@ -151,9 +164,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             )
             self.hf_model = AutoModelForCausalLM.from_pretrained(
                 repo_id,
-                torch_dtype=(
-                    torch.float16 if torch.cuda.is_available() else torch.float32
-                ),
+                torch_dtype=compute_dtype,
                 device_map=None,
                 trust_remote_code=True,
                 low_cpu_mem_usage=True,
@@ -300,6 +311,8 @@ class LLMJudgeValidationModule(BaseValidationModule):
                         max_new_tokens=max_length,
                         temperature=self.config.gen_temperature,
                         do_sample=True,
+                        top_p=0.95,  # Nucleus sampling for stability
+                        top_k=50,    # Limit vocabulary for stability
                         pad_token_id=self.hf_tokenizer.eos_token_id,
                         eos_token_id=self.hf_tokenizer.eos_token_id,
                     )
