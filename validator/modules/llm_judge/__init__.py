@@ -136,7 +136,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 adapter_config = json.load(f)
             base_model = adapter_config["base_model_name_or_path"]
             self.hf_tokenizer = AutoTokenizer.from_pretrained(
-                base_model, trust_remote_code=True, use_fast=True
+                base_model, trust_remote_code=True, use_fast=True, padding_side='left'
             )
             base_hf_model = AutoModelForCausalLM.from_pretrained(base_model, **model_kwargs)
             hf_model = PeftModel.from_pretrained(
@@ -147,7 +147,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             self.hf_model = hf_model.merge_and_unload()
         else:
             self.hf_tokenizer = AutoTokenizer.from_pretrained(
-                repo_id, trust_remote_code=True, use_fast=True
+                repo_id, trust_remote_code=True, use_fast=True, padding_side='left'
             )
             self.hf_model = AutoModelForCausalLM.from_pretrained(
                 repo_id,
@@ -177,6 +177,16 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
             conversation_parts = []
 
+            # Validate conversation structure
+            if not isinstance(conversation, dict):
+                raise LLMJudgeException(f"Conversation must be a dict, got {type(conversation)}")
+            
+            if "conversations" not in conversation:
+                raise LLMJudgeException(f"Conversation dict must have 'conversations' key")
+            
+            if not conversation["conversations"]:
+                raise LLMJudgeException(f"Conversation 'conversations' list is empty")
+
             # Use provided system_text or fall back to template default
             if template.system_format:
                 system_prompt = (
@@ -191,22 +201,31 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     )
                     conversation_parts.append(formatted_system)
 
-                # Multi-turn conversation: format each message according to template
-                for msg in conversation["conversations"]:
-                    if msg["role"] == "user":
-                        user_text = template.user_format.format(
-                            content=msg["content"],
-                            stop_token=self.hf_tokenizer.eos_token,
-                        )
-                        conversation_parts.append(user_text)
-                    elif msg["role"] == "assistant":
-                        assistant_text = template.assistant_format.format(
-                            content=msg["content"],
-                            stop_token=self.hf_tokenizer.eos_token,
-                        )
-                        conversation_parts.append(assistant_text)
+            # Multi-turn conversation: format each message according to template
+            for msg in conversation["conversations"]:
+                if not isinstance(msg, dict) or "role" not in msg or "content" not in msg:
+                    logger.warning(f"Skipping invalid message: {msg}")
+                    continue
+                
+                if msg["role"] == "user":
+                    user_text = template.user_format.format(
+                        content=msg["content"],
+                        stop_token=self.hf_tokenizer.eos_token,
+                    )
+                    conversation_parts.append(user_text)
+                elif msg["role"] == "assistant":
+                    assistant_text = template.assistant_format.format(
+                        content=msg["content"],
+                        stop_token=self.hf_tokenizer.eos_token,
+                    )
+                    conversation_parts.append(assistant_text)
 
             conversation_format = "".join(conversation_parts)
+            
+            if not conversation_format.strip():
+                logger.error(f"Empty template generated. Template: {base_model}, Conversation: {conversation}, Parts: {conversation_parts}")
+                raise LLMJudgeException(f"Generated conversation template is empty after formatting")
+                
         except Exception as e:
             raise LLMJudgeException(
                 f"Failed to construct conversation template: {e}"
@@ -241,15 +260,31 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     template = self._construct_conversation_template(
                         conversation, base_model=base_model,
                     )
+                    
+                    # Validate template is not empty
+                    if not template or not template.strip():
+                        logger.error(f"Empty template generated for conversation: {conversation}")
+                        raise LLMJudgeException(f"Empty conversation template generated")
 
                     batch_conversation_templates.append(template)
 
                 # Simple tokenization
+                # Only pad when batch_size > 1 to avoid unnecessary overhead
                 model_inputs = self.hf_tokenizer(
                     batch_conversation_templates,
                     return_tensors="pt",
                     add_special_tokens=True,
+                    padding=(batch_size > 1),
                 )
+
+                # Validate tokenization results
+                if "input_ids" not in model_inputs or model_inputs["input_ids"].size(0) == 0:
+                    logger.error(f"Tokenization failed for batch {batch_idx}. Templates: {batch_conversation_templates}")
+                    raise LLMJudgeException(f"Tokenization produced empty input_ids for batch {batch_idx}")
+                
+                if model_inputs["input_ids"].size(1) == 0:
+                    logger.error(f"Tokenization produced empty sequences for batch {batch_idx}. Templates: {batch_conversation_templates}")
+                    raise LLMJudgeException(f"Tokenization produced empty sequences for batch {batch_idx}")
 
                 # Move to device if available
                 if (
@@ -269,13 +304,33 @@ class LLMJudgeValidationModule(BaseValidationModule):
                         eos_token_id=self.hf_tokenizer.eos_token_id,
                     )
 
+                # Validate generation outputs
+                if outputs.size(0) == 0:
+                    logger.error(f"Model generation produced no outputs for batch {batch_idx}")
+                    raise LLMJudgeException(f"Model generation produced no outputs for batch {batch_idx}")
+
                 # Decode responses
                 for j, output in enumerate(outputs):
                     # Get the input length for this specific sequence
-                    input_length = model_inputs["input_ids"][j].shape[0]
-
-                    # Extract only the newly generated tokens
-                    generated_ids = output[input_length:]
+                    if j >= model_inputs["input_ids"].size(0):
+                        logger.error(f"Output index {j} out of bounds for input_ids size {model_inputs['input_ids'].size(0)}")
+                        continue
+                    
+                    input_length = model_inputs["input_ids"][j].size(0)
+                    
+                    # Validate output length
+                    if output.size(0) == 0:
+                        logger.warning(f"Empty output at index {j}, skipping")
+                        results.append("")
+                        continue
+                    
+                    if input_length > output.size(0):
+                        logger.warning(f"Input length {input_length} exceeds output length {output.size(0)} at index {j}, using full output")
+                        generated_ids = output
+                    else:
+                        # Extract only the newly generated tokens
+                        generated_ids = output[input_length:]
+                    
                     assistant_response = self.hf_tokenizer.decode(
                         generated_ids, skip_special_tokens=True
                     ).strip()
