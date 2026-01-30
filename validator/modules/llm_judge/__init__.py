@@ -349,7 +349,12 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     ).strip()
 
                     results.append(assistant_response)
-                    # print("assistant_response:", assistant_response)
+                    
+                    # Log sample generated texts for verification
+                    global_idx = i + j
+                    if global_idx < 3:  # Log first 3 generated responses
+                        preview = assistant_response[:500] + "..." if len(assistant_response) > 500 else assistant_response
+                        logger.info(f"[Sample Generation {global_idx + 1}] Response preview:\n{preview}")
 
             logger.info(f"Completed generating all {len(user_input)} conversations")
             return results
@@ -583,6 +588,14 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
         if not generated_conversations:
             raise LLMJudgeException("No valid conversations were generated")
+
+        # Log generation summary
+        non_empty_count = sum(1 for conv in generated_conversations 
+                             if conv["conversations"][-1]["content"].strip())
+        avg_length = sum(len(conv["conversations"][-1]["content"]) 
+                        for conv in generated_conversations) / len(generated_conversations)
+        logger.info(f"Generation summary: {len(generated_conversations)} total, "
+                   f"{non_empty_count} non-empty, avg response length: {avg_length:.0f} chars")
 
         return generated_conversations
 
