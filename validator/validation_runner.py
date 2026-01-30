@@ -100,9 +100,15 @@ class ValidationRunner:
                         last_successful_request_time[task_id] = time.time()
                         break
                     else:
-                        if resp.json() == {"detail": "No task submissions available to validate"}:
+                        # Try to parse JSON response, handle empty or invalid responses
+                        try:
+                            resp_json = resp.json()
+                        except Exception:
+                            resp_json = None
+                        
+                        if resp_json == {"detail": "No task submissions available to validate"}:
                             logger.info("Failed to ask assignment_id: No task submissions available to validate")
-                        elif resp.json() == {"detail": "Rate limit reached for validation assignment lookup: 1 per 3 minutes"}:
+                        elif resp_json == {"detail": "Rate limit reached for validation assignment lookup: 1 per 3 minutes"}:
                             time_since_last_success = time.time() - last_successful_request_time[task_id]
                             if time_since_last_success < self.assignment_lookup_interval:
                                 time_to_sleep = self.assignment_lookup_interval - time_since_last_success

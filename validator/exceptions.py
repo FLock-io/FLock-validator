@@ -4,3 +4,6 @@ class RecoverableException(Exception):
 
 class InvalidModelParametersException(Exception):
     pass
+
+class LLMJudgeException(RecoverableException):
+    pass
