@@ -66,6 +66,8 @@ class LLMJudgeValidationModule(BaseValidationModule):
         self.config = config
         self.client = None
         self.available_models = []
+        self.hf_model = None
+        self.hf_tokenizer = None
 
         # Initialize client and get available models
         self._initialize_client()
