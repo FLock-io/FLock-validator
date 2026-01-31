@@ -102,14 +102,24 @@ class RLValidationModule(BaseValidationModule):
             return RLMetrics(average_reward=LOWEST_POSSIBLE_REWARD)
 
         # Download and load test data (.npz file containing X_test and Info_test)
-        print(f"Downloading test data from {data.validation_set_url}")
-        response = requests.get(data.validation_set_url, timeout=10)
-        response.raise_for_status()
-
-        # Load the .npz file and extract X_test and Info_test
-        with np.load(BytesIO(response.content)) as test_data:
-            test_X = test_data['X']
-            test_Info = test_data['Info']
+        # Handle both local files (file://) and remote URLs
+        validation_url = data.validation_set_url
+        if validation_url.startswith("file://"):
+            # Local file path
+            local_path = validation_url[7:]  # Remove 'file://' prefix
+            print(f"Loading test data from local file: {local_path}")
+            with np.load(local_path) as test_data:
+                test_X = test_data['X']
+                test_Info = test_data['Info']
+        else:
+            # Remote URL
+            print(f"Downloading test data from {validation_url}")
+            response = requests.get(validation_url, timeout=10)
+            response.raise_for_status()
+            # Load the .npz file and extract X_test and Info_test
+            with np.load(BytesIO(response.content)) as test_data:
+                test_X = test_data['X']
+                test_Info = test_data['Info']
 
         print(f"Loaded test data: X_test {test_X.shape}, Info_test {test_Info.shape}")
 
