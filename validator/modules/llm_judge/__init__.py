@@ -108,6 +108,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 filename="adapter_config.json",
                 local_dir="judge",
                 revision=revision,
+                force_download=True,  # Disable fallback to cached files
             )
         except Exception as e:
             if "adapter_config.json" in str(e):
@@ -144,6 +145,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 repo_id=repo_id,
                 local_dir="judge",
                 revision=revision,
+                force_download=True,  # Disable fallback to cached files
             )
             with open("judge/adapter_config.json", "r") as f:
                 adapter_config = json.load(f)
