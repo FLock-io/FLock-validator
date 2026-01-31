@@ -39,7 +39,7 @@ Edit the `.env` file and set your API credentials:
 
 ```bash
 OPENAI_BASE_URL=https://api.flock.io/v1
-OPENAI_API_KEY=your_flock_api_key_here
+OPENAI_API_KEY=your_flock_api_platform_key_here
 ```
 
 **Note:** The `OPENAI_API_KEY` in the `.env` file should be set to your FLock API key, which is used for LLM-as-a-judge evaluation.
@@ -53,7 +53,7 @@ Run the validation module from the root directory of the repository:
 ```bash
 python run.py llm_judge \
   --task_ids 312 \
-  --flock-api-key YOUR_FLOCK_API_KEY \
+  --flock-api-key YOUR_FLOCK_ARENA_API_KEY \
   --hf-token YOUR_HUGGINGFACE_TOKEN
 ```
 
