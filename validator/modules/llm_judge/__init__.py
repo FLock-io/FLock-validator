@@ -75,15 +75,17 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
     def _initialize_client(self):
         try:
-            http_client = httpx.Client(
-                base_url=os.getenv("OPENAI_BASE_URL"),
-                headers={"Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}"},
+            timeout = httpx.Timeout(
+                connect=10.0,   # 10s to establish connection
+                read=120.0,     # 120s max to receive response
+                write=20.0,     # 20s to send request
+                pool=10.0,      # 10s to acquire connection from pool
             )
 
             self.client = OpenAI(
                 api_key=os.getenv("OPENAI_API_KEY"),
                 base_url=os.getenv("OPENAI_BASE_URL"),
-                http_client=http_client,
+                timeout=timeout,
             )
 
         except Exception as e:
