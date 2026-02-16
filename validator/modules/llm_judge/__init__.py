@@ -16,6 +16,7 @@ from validator.modules.llm_judge.prompt import get_prompt
 from validator.modules.llm_judge.utils import download_file
 from validator.exceptions import LLMJudgeException, InvalidModelParametersException
 from validator.modules.llm_judge.template import template_dict
+from validator.modules.llm_judge.model_config import MODEL_SUFFIX_MAPPING
 from peft import PeftModel
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from validator.modules.base import (
@@ -410,6 +411,24 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
         return normalized
 
+    def _parse_model_name_to_params(self, model_name: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
+        params = {}
+        extra = {}
+        parts = model_name.split('-')
+
+        suffix_map = {m["suffix"].lower(): m for m in MODEL_SUFFIX_MAPPING}
+
+        model_parts = []
+        for part in parts:
+            if mapping := suffix_map.get(part.lower()):
+                target_dict = extra if mapping["target"] == "extra_body" else params
+                target_dict[mapping["param_name"]] = mapping["param_value"]
+            else:
+                model_parts.append(part)
+
+        cleaned_model_name = '-'.join(model_parts) if model_parts else model_name
+        return cleaned_model_name, params, extra
+
     def _call_gpt(
             self, messages: List[Dict[str, str]], eval_args: dict
     ) -> tuple[str, str]:
@@ -425,10 +444,12 @@ class LLMJudgeValidationModule(BaseValidationModule):
         """
         # Check if a specific model is requested
         if "selected_model" in eval_args:
-            selected_model = eval_args["selected_model"]
+            eval_model = eval_args["selected_model"]
         else:
-            selected_model = self._select_eval_model(eval_args)
+            eval_model = self._select_eval_model(eval_args)
         temperature = eval_args.get("temperature", 0.1)  # Default eval temperature
+
+        selected_model, model_params, model_extra = self._parse_model_name_to_params(eval_model)
 
         # Patch: kimi-k2.5 requires temperature=1
         if selected_model == "kimi-k2.5":
@@ -439,7 +460,9 @@ class LLMJudgeValidationModule(BaseValidationModule):
             "messages": messages,
             "temperature": temperature,
             "seed": random.randint(0, 10000),
+            "extra_body": model_extra,
         }
+        params.update(model_params)
 
         def log_retry(retry_state):
             logger.warning(
