@@ -16,7 +16,6 @@ from validator.modules.llm_judge.prompt import get_prompt
 from validator.modules.llm_judge.utils import download_file
 from validator.exceptions import LLMJudgeException, InvalidModelParametersException
 from validator.modules.llm_judge.template import template_dict
-from validator.modules.llm_judge.model_config import MODEL_SUFFIX_MAPPING
 from peft import PeftModel
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from validator.modules.base import (
@@ -412,17 +411,19 @@ class LLMJudgeValidationModule(BaseValidationModule):
         return normalized
 
     def _parse_model_name_to_params(self, model_name: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
-        params = {}
-        extra = {}
+
+        params: Dict[str, Any] = {}
+        extra: Dict[str, Any] = {}
+        model_parts: List[str] = []
+
         parts = model_name.split('-')
-
-        suffix_map = {m["suffix"].lower(): m for m in MODEL_SUFFIX_MAPPING}
-
-        model_parts = []
         for part in parts:
-            if mapping := suffix_map.get(part.lower()):
-                target_dict = extra if mapping["target"] == "extra_body" else params
-                target_dict[mapping["param_name"]] = mapping["param_value"]
+            if part == "low":
+                params["reasoning_effort"] = "low"
+            elif part == "high":
+                params["reasoning_effort"] = "high"
+            elif part == "thinking":
+                extra["thinking"] = {"enabled": True}
             else:
                 model_parts.append(part)
 
