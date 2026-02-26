@@ -647,6 +647,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     "generation_index": gen_try,
                     "total_generations": max_gen_try,
                     "reference": input_item.get("reference"),
+                    "tools": input_item.get("tools"),
                 }
                 generated_conversations.append(conversation)
 
