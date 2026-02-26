@@ -700,6 +700,8 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 formatted_parts.append(f"Assistant: {content}")
             elif role == "function_call":
                 formatted_parts.append(f"Function Call: {content}")
+            elif role == "observation":
+                formatted_parts.append(f"Observation: {content}")
 
         return "\n\n".join(formatted_parts), assistant_response
 
