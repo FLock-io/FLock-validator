@@ -914,19 +914,20 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
         try:
             self._load_model(data.hg_repo_id, data.revision, data.max_params)
+            # Stage 1: Generate all responses
+            logger.info("Stage 1: Generating all conversations for evaluation...")
+            all_conversations = self._load_jsonl_conversations(
+                data.base_model, eval_file, data.eval_args, data.context_length
+            )
         except InvalidModelParametersException as e:
             # lowest possible reward for invalid model parameters
-            logger.info(f"Invalid model parameters: {e}")
+            logger.error(f"Invalid model parameters: {e}")
+            return LLMJudgeMetrics(score=LOWEST_POSSIBLE_SCORE)
+        except Exception as e:
+            logger.error(f"Generate conversations error: {e}")
             return LLMJudgeMetrics(score=LOWEST_POSSIBLE_SCORE)
 
-        # Stage 1: Generate all responses
-        logger.info("Stage 1: Generating all conversations for evaluation...")
-        all_conversations = self._load_jsonl_conversations(
-            data.base_model, eval_file, data.eval_args, data.context_length
-        )
-
         # Load evaluation arguments
-
         max_eval_try = data.eval_args.get(
             "eval_require", 3
         )  # Default max evaluation tries
