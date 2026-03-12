@@ -37,7 +37,7 @@ LOWEST_POSSIBLE_SCORE = -999
 class LLMJudgeConfig(BaseConfig):
     gen_batch_size: int = 1
     eval_batch_size: int = 16
-    gen_temperature: float = 0.1
+    gen_temperature: float = 0.7
 
 
 class LLMJudgeMetrics(BaseMetrics):
@@ -139,7 +139,6 @@ class LLMJudgeValidationModule(BaseValidationModule):
         model_kwargs = dict(
             trust_remote_code=True,
             torch_dtype=compute_dtype,
-            use_cache=False,
             device_map="auto",
         )
         if is_lora:
@@ -180,74 +179,6 @@ class LLMJudgeValidationModule(BaseValidationModule):
             )
             raise InvalidModelParametersException(f"Model parameters {total} exceed limit {max_params}")
 
-    def _construct_conversation_template(
-            self, conversation: List[Dict[str, str]], base_model: str,
-    ) -> str:
-        try:
-            if base_model not in template_dict:
-                logger.info(f"Template {base_model} not found, using default")
-                base_model = "default"
-
-            template = template_dict[base_model]
-
-            conversation_parts = []
-
-            # Validate conversation structure
-            if not isinstance(conversation, dict):
-                raise LLMJudgeException(f"Conversation must be a dict, got {type(conversation)}")
-            
-            if "conversations" not in conversation:
-                raise LLMJudgeException(f"Conversation dict must have 'conversations' key")
-            
-            if not conversation["conversations"]:
-                raise LLMJudgeException(f"Conversation 'conversations' list is empty")
-
-            # Use provided system_text or fall back to template default
-            if template.system_format:
-                system_prompt = (
-                    conversation["system"] if "system" in conversation else None
-                )
-                system_content = (
-                    system_prompt if system_prompt else "You are a helpful assistant."
-                )
-                if system_content:
-                    formatted_system = template.system_format.format(
-                        content=system_content
-                    )
-                    conversation_parts.append(formatted_system)
-
-            # Multi-turn conversation: format each message according to template
-            for msg in conversation["conversations"]:
-                if not isinstance(msg, dict) or "role" not in msg or "content" not in msg:
-                    logger.warning(f"Skipping invalid message: {msg}")
-                    continue
-                
-                if msg["role"] == "user":
-                    user_text = template.user_format.format(
-                        content=msg["content"],
-                        stop_token=self.hf_tokenizer.eos_token,
-                    )
-                    conversation_parts.append(user_text)
-                elif msg["role"] == "assistant":
-                    assistant_text = template.assistant_format.format(
-                        content=msg["content"],
-                        stop_token=self.hf_tokenizer.eos_token,
-                    )
-                    conversation_parts.append(assistant_text)
-
-            conversation_format = "".join(conversation_parts)
-            
-            if not conversation_format.strip():
-                logger.error(f"Empty template generated. Template: {base_model}, Conversation: {conversation}, Parts: {conversation_parts}")
-                raise LLMJudgeException(f"Generated conversation template is empty after formatting")
-                
-        except Exception as e:
-            raise LLMJudgeException(
-                f"Failed to construct conversation template: {e}"
-            ) from e
-
-        return conversation_format
-
     def _generate_response(
             self,
             context_length: int,
@@ -272,10 +203,22 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 # Apply chat template with fallback
                 batch_conversation_templates = []
                 for conversation in batch_conversations:
-                    template = self._construct_conversation_template(
-                        conversation, base_model=base_model,
+
+                    messages = []
+                    if "system" in conversation:
+                        messages.append({
+                            "role": "system",
+                            "content": conversation["system"]
+                        })
+
+                    messages += conversation["conversations"]
+                    template = self.hf_tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        enable_thinking=False,
                     )
-                    
+
                     # Validate template is not empty
                     if not template or not template.strip():
                         logger.error(f"Empty template generated for conversation: {conversation}")
@@ -313,10 +256,10 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     outputs = self.hf_model.generate(
                         **model_inputs,
                         max_new_tokens=max_length,
-                        temperature=self.config.gen_temperature,
+                        temperature=self.config.gen_temperature,  # Non thinking-General 0.7 ,Reasoning 1
                         do_sample=True,
-                        top_p=0.95,  # Nucleus sampling for stability
-                        top_k=50,    # Limit vocabulary for stability
+                        top_p=0.8,  # Non thinking-General 0.8 ,Reasoning 0.95
+                        top_k=20,    #
                         pad_token_id=self.hf_tokenizer.eos_token_id,
                         eos_token_id=self.hf_tokenizer.eos_token_id,
                     )
