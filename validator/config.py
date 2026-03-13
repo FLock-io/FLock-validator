@@ -29,3 +29,19 @@ def load_config_for_task(
 
     # 3. Use Pydantic model defaults for missing values
     return config_model(**config_data)
+
+
+def load_config_from_file(
+    task_type: str,
+    config_model: Type[BaseConfig],
+    config_dir: str = "configs"
+) -> BaseConfig:
+    """
+    Loads config for a given task_type from file (for local testing).
+    """
+    config_data: dict[str, Any] = {}
+    type_config_path = Path(config_dir) / f"{task_type}.json"
+    if type_config_path.exists():
+        with open(type_config_path, "r") as f:
+            config_data.update(json.load(f))
+    return config_model(**config_data)
