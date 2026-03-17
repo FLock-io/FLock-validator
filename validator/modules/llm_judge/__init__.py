@@ -14,6 +14,7 @@ from huggingface_hub import HfApi
 from typing import List, Dict, Any
 from validator.modules.llm_judge.prompt import get_prompt
 from validator.modules.llm_judge.utils import download_file
+from validator.modules.llm_judge.constant import SUPPORTED_BASE_MODELS
 from validator.exceptions import LLMJudgeException, InvalidModelParametersException
 from peft import PeftModel
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -155,6 +156,18 @@ class LLMJudgeValidationModule(BaseValidationModule):
             with open("judge/adapter_config.json", "r") as f:
                 adapter_config = json.load(f)
             base_model = adapter_config["base_model_name_or_path"]
+            if base_model in SUPPORTED_BASE_MODELS:
+                logger.info(
+                    f"LoRA's base model '{base_model}' is in SUPPORTED_BASE_MODELS. "
+                    f"Using it for tokenizer."
+                )
+            else:
+                logger.error(
+                    f"LoRA's base model '{base_model}' is not in SUPPORTED_BASE_MODELS. "
+                    f"Marking assignment as failed."
+                )
+                raise
+
             self.hf_tokenizer = AutoTokenizer.from_pretrained(
                 base_model, trust_remote_code=True, use_fast=True, padding_side="left"
             )
@@ -843,7 +856,10 @@ class LLMJudgeValidationModule(BaseValidationModule):
             self._load_model(data.hg_repo_id, data.revision, data.max_params)
         except InvalidModelParametersException as e:
             # lowest possible reward for invalid model parameters
-            logger.info(f"Invalid model parameters: {e}")
+            logger.error(f"Invalid model parameters: {e}")
+            return LLMJudgeMetrics(score=LOWEST_POSSIBLE_SCORE)
+        except Exception as e:
+            logger.error(f"Exception when load model: {e}")
             return LLMJudgeMetrics(score=LOWEST_POSSIBLE_SCORE)
 
         # Stage 1: Generate all responses
