@@ -45,6 +45,7 @@ class LLMJudgeMetrics(BaseMetrics):
 
 class LLMJudgeInputData(BaseInputData):
     """Input data for LLMJudge"""
+
     hg_repo_id: str
     revision: str
     context_length: int
@@ -75,10 +76,10 @@ class LLMJudgeValidationModule(BaseValidationModule):
     def _initialize_client(self):
         try:
             timeout = httpx.Timeout(
-                connect=10.0,   # 10s to establish connection
-                read=120.0,     # 120s max to receive response
-                write=20.0,     # 20s to send request
-                pool=10.0,      # 10s to acquire connection from pool
+                connect=10.0,  # 10s to establish connection
+                read=120.0,  # 120s max to receive response
+                write=20.0,  # 20s to send request
+                pool=10.0,  # 10s to acquire connection from pool
             )
 
             self.client = OpenAI(
@@ -88,7 +89,9 @@ class LLMJudgeValidationModule(BaseValidationModule):
             )
 
         except Exception as e:
-            raise LLMJudgeException(f"OPENAI_API_KEY and OPENAI_BASE_URL are not set in the environment variables: {e}") from e
+            raise LLMJudgeException(
+                f"OPENAI_API_KEY and OPENAI_BASE_URL are not set in the environment variables: {e}"
+            ) from e
 
     def _fetch_available_models(self):
         try:
@@ -113,7 +116,9 @@ class LLMJudgeValidationModule(BaseValidationModule):
             )
         except Exception as e:
             if "adapter_config.json" in str(e):
-                logger.error("No adapter_config.json found in the repo, assuming full model")
+                logger.error(
+                    "No adapter_config.json found in the repo, assuming full model"
+                )
                 return False
             else:
                 raise  # Re-raise the exception if it's not related to the missing file
@@ -122,7 +127,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
     def _load_model(self, repo_id: str, revision: str = "main", max_params: int = None):
 
         is_lora = self._download_lora_config(repo_id, revision=revision)
-        
+
         # Determine best dtype: prefer BF16 for numerical stability, fallback to FP16
         if torch.cuda.is_available():
             if torch.cuda.is_bf16_supported():
@@ -134,7 +139,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         else:
             compute_dtype = torch.float32
             logger.info("Using float32 (CPU mode)")
-        
+
         model_kwargs = dict(
             trust_remote_code=True,
             torch_dtype=compute_dtype,
@@ -151,9 +156,11 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 adapter_config = json.load(f)
             base_model = adapter_config["base_model_name_or_path"]
             self.hf_tokenizer = AutoTokenizer.from_pretrained(
-                base_model, trust_remote_code=True, use_fast=True, padding_side='left'
+                base_model, trust_remote_code=True, use_fast=True, padding_side="left"
             )
-            base_hf_model = AutoModelForCausalLM.from_pretrained(base_model, **model_kwargs)
+            base_hf_model = AutoModelForCausalLM.from_pretrained(
+                base_model, **model_kwargs
+            )
             hf_model = PeftModel.from_pretrained(
                 base_hf_model,
                 "judge",
@@ -162,7 +169,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             self.hf_model = hf_model.merge_and_unload()
         else:
             self.hf_tokenizer = AutoTokenizer.from_pretrained(
-                repo_id, trust_remote_code=True, use_fast=True, padding_side='left'
+                repo_id, trust_remote_code=True, use_fast=True, padding_side="left"
             )
             self.hf_model = AutoModelForCausalLM.from_pretrained(
                 repo_id,
@@ -176,19 +183,20 @@ class LLMJudgeValidationModule(BaseValidationModule):
             logger.info(
                 f"Total model params: {total} exceeds the limit {max_params}, submitting validation result with a large loss"
             )
-            raise InvalidModelParametersException(f"Model parameters {total} exceed limit {max_params}")
+            raise InvalidModelParametersException(
+                f"Model parameters {total} exceed limit {max_params}"
+            )
 
     def _generate_response(
-            self,
-            context_length: int,
-            user_input: list = list[
-                list[dict[str, str]]
-            ],  # list of conversations, each conversation is a list of messages
-            base_model: str = "default",
-            max_length: int = 2048,
-            batch_size: int = 1,
-            eval_args: dict = None,
-
+        self,
+        context_length: int,
+        user_input: list = list[
+            list[dict[str, str]]
+        ],  # list of conversations, each conversation is a list of messages
+        base_model: str = "default",
+        max_length: int = 2048,
+        batch_size: int = 1,
+        eval_args: dict = None,
     ) -> list:
         if self.hf_model is None or self.hf_tokenizer is None:
             raise LLMJudgeException("HuggingFace model not loaded")
@@ -197,7 +205,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             results = []
             total_batches = (len(user_input) + batch_size - 1) // batch_size
             for batch_idx, i in enumerate(range(0, len(user_input), batch_size), 1):
-                batch_conversations = user_input[i: i + batch_size]
+                batch_conversations = user_input[i : i + batch_size]
 
                 # Apply chat template with fallback
                 batch_conversation_templates = []
@@ -220,8 +228,12 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
                     # Validate template is not empty
                     if not template or not template.strip():
-                        logger.error(f"Empty template generated for conversation: {conversation}")
-                        raise LLMJudgeException(f"Empty conversation template generated")
+                        logger.error(
+                            f"Empty template generated for conversation: {conversation}"
+                        )
+                        raise LLMJudgeException(
+                            f"Empty conversation template generated"
+                        )
 
                     batch_conversation_templates.append(template)
 
@@ -235,22 +247,35 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 )
 
                 # Validate tokenization results
-                if "input_ids" not in model_inputs or model_inputs["input_ids"].size(0) == 0:
-                    logger.error(f"Tokenization failed for batch {batch_idx}. Templates: {batch_conversation_templates}")
-                    raise LLMJudgeException(f"Tokenization produced empty input_ids for batch {batch_idx}")
-                
+                if (
+                    "input_ids" not in model_inputs
+                    or model_inputs["input_ids"].size(0) == 0
+                ):
+                    logger.error(
+                        f"Tokenization failed for batch {batch_idx}. Templates: {batch_conversation_templates}"
+                    )
+                    raise LLMJudgeException(
+                        f"Tokenization produced empty input_ids for batch {batch_idx}"
+                    )
+
                 if model_inputs["input_ids"].size(1) == 0:
-                    logger.error(f"Tokenization produced empty sequences for batch {batch_idx}. Templates: {batch_conversation_templates}")
-                    raise LLMJudgeException(f"Tokenization produced empty sequences for batch {batch_idx}")
+                    logger.error(
+                        f"Tokenization produced empty sequences for batch {batch_idx}. Templates: {batch_conversation_templates}"
+                    )
+                    raise LLMJudgeException(
+                        f"Tokenization produced empty sequences for batch {batch_idx}"
+                    )
 
                 # Move to device if available
                 if (
-                        torch.cuda.is_available()
-                        and next(self.hf_model.parameters()).is_cuda
+                    torch.cuda.is_available()
+                    and next(self.hf_model.parameters()).is_cuda
                 ):
                     model_inputs = {k: v.cuda() for k, v in model_inputs.items()}
 
-                logger.info(f"Generating batch {batch_idx}/{total_batches} ({min(i + batch_size, len(user_input))}/{len(user_input)} conversations)...")
+                logger.info(
+                    f"Generating batch {batch_idx}/{total_batches} ({min(i + batch_size, len(user_input))}/{len(user_input)} conversations)..."
+                )
                 with torch.no_grad():
                     outputs = self.hf_model.generate(
                         **model_inputs,
@@ -265,42 +290,56 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
                 # Validate generation outputs
                 if outputs.size(0) == 0:
-                    logger.error(f"Model generation produced no outputs for batch {batch_idx}")
-                    raise LLMJudgeException(f"Model generation produced no outputs for batch {batch_idx}")
+                    logger.error(
+                        f"Model generation produced no outputs for batch {batch_idx}"
+                    )
+                    raise LLMJudgeException(
+                        f"Model generation produced no outputs for batch {batch_idx}"
+                    )
 
                 # Decode responses
                 for j, output in enumerate(outputs):
                     # Get the input length for this specific sequence
                     if j >= model_inputs["input_ids"].size(0):
-                        logger.error(f"Output index {j} out of bounds for input_ids size {model_inputs['input_ids'].size(0)}")
+                        logger.error(
+                            f"Output index {j} out of bounds for input_ids size {model_inputs['input_ids'].size(0)}"
+                        )
                         continue
-                    
+
                     input_length = model_inputs["input_ids"][j].size(0)
-                    
+
                     # Validate output length
                     if output.size(0) == 0:
                         logger.warning(f"Empty output at index {j}, skipping")
                         results.append("")
                         continue
-                    
+
                     if input_length > output.size(0):
-                        logger.warning(f"Input length {input_length} exceeds output length {output.size(0)} at index {j}, using full output")
+                        logger.warning(
+                            f"Input length {input_length} exceeds output length {output.size(0)} at index {j}, using full output"
+                        )
                         generated_ids = output
                     else:
                         # Extract only the newly generated tokens
                         generated_ids = output[input_length:]
-                    
+
                     assistant_response = self.hf_tokenizer.decode(
                         generated_ids, skip_special_tokens=True
                     ).strip()
 
                     results.append(assistant_response)
-                    
+
                     # Log sample generated texts for verification
                     global_idx = i + j
                     if global_idx < 3:  # Log first 3 generated responses
-                        preview = assistant_response[:500] + "..." if len(assistant_response) > 500 else assistant_response
-                        logger.info(f"[Sample Generation {global_idx + 1}] Response preview:\n{preview}")
+                        preview = (
+                            assistant_response[:500] + "..."
+                            if len(assistant_response) > 500
+                            else assistant_response
+                        )
+                        logger.info(
+                            f"[Sample Generation {global_idx + 1}] Response preview:\n{preview}"
+                        )
 
             logger.info(f"Completed generating all {len(user_input)} conversations")
             return results
@@ -312,25 +351,61 @@ class LLMJudgeValidationModule(BaseValidationModule):
         """
         Select evaluation model based on eval_args configuration
         """
-        eval_model_list = eval_args.get("eval_model_list", [])
+        eval_model_list = self._resolve_eval_models(eval_args)
 
         if eval_model_list:
-            # Check if all models in eval_model_list are available
-            available_eval_models = [
-                model for model in eval_model_list if model in self.available_models
-            ]
-
-            if len(available_eval_models) == len(eval_model_list):
-                selected_model = random.choice(eval_model_list)
-                logger.info(f"Using eval_model_list: selected {selected_model}")
-                return selected_model
+            selected_model = random.choice(eval_model_list)
+            logger.info(f"Using eval_model_list: selected {selected_model}")
+            return selected_model
 
         # random selection from available models
         selected_model = random.choice(self.available_models)
         return selected_model
 
+    def _resolve_eval_models(self, eval_args: dict) -> List[str]:
+        """
+        Resolve requested eval models against provider model list.
+        Supports alias forms like "<model>-low/high" by matching their parsed base model.
+        Returns requested model names (so extra params can still be derived later).
+        """
+        requested_models = eval_args.get("eval_model_list", []) if eval_args else []
+        if not requested_models:
+            return self.available_models
+
+        resolved_models = []
+        missing_models = []
+        for requested_model in requested_models:
+            if requested_model in self.available_models:
+                resolved_models.append(requested_model)
+                continue
+
+            parsed_model_name, _ = self._parse_model_name_to_params(requested_model)
+            if parsed_model_name in self.available_models:
+                logger.info(
+                    f"Resolved eval model '{requested_model}' to available model '{parsed_model_name}'."
+                )
+                resolved_models.append(requested_model)
+            else:
+                missing_models.append(requested_model)
+
+        # De-duplicate while preserving order
+        resolved_models = list(dict.fromkeys(resolved_models))
+
+        if missing_models:
+            logger.warning(
+                f"Requested eval models not available and will be skipped: {missing_models}"
+            )
+
+        if not resolved_models:
+            logger.warning(
+                "No requested eval models matched provider list, falling back to all available models."
+            )
+            return self.available_models
+
+        return resolved_models
+
     def _normalize_score(
-            self, score: float, min_score: float = 0, max_score: float = 10.0
+        self, score: float, min_score: float = 0, max_score: float = 10.0
     ) -> float:
         """
         Normalize score to (0, 1) range
@@ -352,8 +427,29 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
         return normalized
 
+    def _parse_model_name_to_params(self, model_name: str) -> tuple[str, dict[str, Any]]:
+        params: dict[str, Any] = {}
+        extra: dict[str, Any] = {}
+        model_parts: list[str] = []
+
+        REASONING_EFFORTS = {"low", "high"}
+
+        for part in model_name.split('-'):
+            if part in REASONING_EFFORTS:
+                params["reasoning_effort"] = part
+            elif part == "thinking":
+                extra["extra_body"] = {"thinking": {"type": "enabled"}}
+            else:
+                model_parts.append(part)
+
+        cleaned_model_name = '-'.join(model_parts) if model_parts else model_name
+        if cleaned_model_name == "kimi-k2.5":
+            extra.setdefault("extra_body", {"thinking": {"type": "disabled"}})
+        params["extra_body"] = extra
+        return cleaned_model_name, params
+
     def _call_gpt(
-            self, messages: List[Dict[str, str]], eval_args: dict
+        self, messages: List[Dict[str, str]], eval_args: dict
     ) -> tuple[str, str]:
         """
         Call GPT API with model and temperature from eval_args, with exponential backoff retry.
@@ -367,13 +463,17 @@ class LLMJudgeValidationModule(BaseValidationModule):
         """
         # Check if a specific model is requested
         if "selected_model" in eval_args:
-            selected_model = eval_args["selected_model"]
+            eval_model = eval_args["selected_model"]
         else:
-            selected_model = self._select_eval_model(eval_args)
+            eval_model = self._select_eval_model(eval_args)
         temperature = eval_args.get("temperature", 0.1)  # Default eval temperature
 
-        # Patch: kimi-k2.5 requires temperature=1
-        if selected_model == "kimi-k2.5":
+        selected_model, model_params = self._parse_model_name_to_params(eval_model)
+
+        # Patch: kimi-k2.5-thinking requires temperature=1 and instant requires temperature=0.6
+        if eval_model == "kimi-k2.5":
+            temperature = 0.6
+        elif eval_model == "kimi-k2.5-thinking":
             temperature = 1
 
         params = {
@@ -382,6 +482,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             "temperature": temperature,
             "seed": random.randint(0, 10000),
         }
+        params.update(model_params)
 
         def log_retry(retry_state):
             logger.warning(
@@ -408,11 +509,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
             )
 
     def _load_jsonl_conversations(
-            self,
-            base_model: str,
-            test_file: str,
-            eval_args: dict,
-            context_length: int
+        self, base_model: str, test_file: str, eval_args: dict, context_length: int
     ) -> List[Dict[str, Any]]:
 
         # Extract parameters from eval_args
@@ -437,6 +534,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 # Extract conversation history for multi-turn support
                 conversation_to_process = []
                 reference_response = None
+                tools_info = None
 
                 if "conversations" in json_data:
                     conversations = json_data["conversations"]
@@ -445,19 +543,25 @@ class LLMJudgeValidationModule(BaseValidationModule):
                         for msg in conversations:
                             role = msg.get("role", "")
                             content = msg.get("content", "").strip()
-                            if role in ["user", "assistant"] and content:
+                            if (
+                                role in ["user", "assistant", "function_call"]
+                                and content
+                            ):
                                 conversation_to_process.append(
                                     {"role": role, "content": content}
                                 )
 
-                        # Extract reference response (last assistant message) if it exists
+                        # Extract reference response (last assistant or function_call message)
                         reference_response = None
-                        if (
-                                conversation_to_process
-                                and conversation_to_process[-1]["role"] == "assistant"
-                        ):
-                            reference_response = conversation_to_process[-1]["content"]
-                            conversation_to_process = conversation_to_process[:-1]
+                        if conversation_to_process:
+                            last_msg = conversation_to_process[-1]
+                            if last_msg["role"] in ["assistant", "function_call"]:
+                                reference_response = last_msg["content"]
+                                conversation_to_process = conversation_to_process[:-1]
+
+                        # Extract tools information if available (for function_call evaluation)
+                        if "tools" in json_data:
+                            tools_info = json_data["tools"]
 
                 # If no conversations found, try to extract from "user" field
                 if not conversation_to_process:
@@ -480,6 +584,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                         "conversation": input_conversations_data,
                         "line_num": line_num,
                         "reference": reference_response,
+                        "tools": tools_info,
                     }
                 )
 
@@ -494,7 +599,9 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
         # Generate responses for each input conversation
         for gen_try in range(max_gen_try):
-            logger.info(f"Generation attempt {gen_try + 1}/{max_gen_try} for {len(input_conversations)} conversations...")
+            logger.info(
+                f"Generation attempt {gen_try + 1}/{max_gen_try} for {len(input_conversations)} conversations..."
+            )
             # Prepare batch of conversations for generation
             batch_conversations = [item["conversation"] for item in input_conversations]
 
@@ -509,18 +616,18 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
             # Create conversation structures for this generation
             for input_item, assistant_response in zip(
-                    input_conversations, assistant_responses
+                input_conversations, assistant_responses
             ):
                 # Create final conversation with assistant response
                 final_conversations = (
-                        [
-                            {
-                                "role": "system",
-                                "content": input_item["conversation"]["system"],
-                            }
-                        ]
-                        + input_item["conversation"]["conversations"]
-                        + [{"role": "assistant", "content": assistant_response}]
+                    [
+                        {
+                            "role": "system",
+                            "content": input_item["conversation"]["system"],
+                        }
+                    ]
+                    + input_item["conversation"]["conversations"]
+                    + [{"role": "assistant", "content": assistant_response}]
                 )
 
                 # Create conversation structure for this generation
@@ -529,6 +636,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     "generation_index": gen_try,
                     "total_generations": max_gen_try,
                     "reference": input_item.get("reference"),
+                    "tools": input_item.get("tools"),
                 }
                 generated_conversations.append(conversation)
 
@@ -536,28 +644,43 @@ class LLMJudgeValidationModule(BaseValidationModule):
             raise LLMJudgeException("No valid conversations were generated")
 
         # Log generation summary
-        non_empty_count = sum(1 for conv in generated_conversations 
-                             if conv["conversations"][-1]["content"].strip())
-        avg_length = sum(len(conv["conversations"][-1]["content"]) 
-                        for conv in generated_conversations) / len(generated_conversations)
-        logger.info(f"Generation summary: {len(generated_conversations)} total, "
-                   f"{non_empty_count} non-empty, avg response length: {avg_length:.0f} chars")
+        non_empty_count = sum(
+            1
+            for conv in generated_conversations
+            if conv["conversations"][-1]["content"].strip()
+        )
+        avg_length = sum(
+            len(conv["conversations"][-1]["content"])
+            for conv in generated_conversations
+        ) / len(generated_conversations)
+        logger.info(
+            f"Generation summary: {len(generated_conversations)} total, "
+            f"{non_empty_count} non-empty, avg response length: {avg_length:.0f} chars"
+        )
 
         return generated_conversations
 
-    def _format_single_conversation(self, conversation_data: Dict[str, Any]) -> str:
-        """Format a single conversation for evaluation"""
+    def _format_single_conversation(
+        self, conversation_data: Dict[str, Any]
+    ) -> tuple[str, str]:
+        """Format a single conversation for evaluation, returns (context, assistant_response)"""
         conversations = conversation_data.get("conversations", [])
 
         if not conversations:
-            return "No conversation found"
+            return "No conversation found", ""
 
-        # Format the conversation
+        # Format the conversation, separating context from the last assistant response
         formatted_parts = []
+        assistant_response = ""
 
-        for msg in conversations:
+        for i, msg in enumerate(conversations):
             role = msg.get("role", "")
             content = msg.get("content", "")
+
+            # Check if this is the last message and it's an assistant/function_call response
+            if i == len(conversations) - 1 and role in ["assistant", "function_call"]:
+                assistant_response = content
+                break
 
             if role == "system":
                 formatted_parts.append(f"System: {content}")
@@ -565,21 +688,57 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 formatted_parts.append(f"User: {content}")
             elif role == "assistant":
                 formatted_parts.append(f"Assistant: {content}")
+            elif role == "function_call":
+                formatted_parts.append(f"Function Call: {content}")
+            elif role == "observation":
+                formatted_parts.append(f"Observation: {content}")
 
-        return "\n\n".join(formatted_parts)
+        return "\n\n".join(formatted_parts), assistant_response
 
     def _construct_evaluation_prompt(
-            self, conversation_context: str, prompt_id: int, reference: str = None
+        self,
+        conversation_context: str,
+        prompt_id: int,
+        reference: str = None,
+        tools: str = None,
+        assistant_response: str = None,
     ) -> List[Dict[str, str]]:
         """Construct evaluation prompt for a single conversation"""
         try:
-            if reference and prompt_id == 2:
-                # Use reference evaluation prompt
-                user_message = get_prompt(prompt_id, conversation_context, reference)
+            if prompt_id == 1:
+                # Default evaluation prompt with assistant response
+                user_message = get_prompt(
+                    prompt_id,
+                    conversation_context,
+                    assistant_response=assistant_response,
+                )
+            elif reference and prompt_id == 2:
+                # Use reference evaluation prompt with assistant response
+                user_message = get_prompt(
+                    prompt_id,
+                    conversation_context,
+                    reference,
+                    assistant_response=assistant_response,
+                )
+            elif reference and prompt_id == 3 and tools:
+                # Use function_call reference evaluation prompt with tools and assistant response
+                user_message = get_prompt(
+                    prompt_id,
+                    conversation_context,
+                    reference,
+                    tools,
+                    assistant_response,
+                )
             else:
-                user_message = get_prompt(prompt_id, conversation_context)
+                user_message = get_prompt(
+                    prompt_id,
+                    conversation_context,
+                    assistant_response=assistant_response,
+                )
         except ValueError as e:
-            user_message = get_prompt(1, conversation_context)
+            user_message = get_prompt(
+                1, conversation_context, assistant_response=assistant_response
+            )
             logger.warning(f"Warning: {e}. Using default prompt.")
 
         system_prompt = """You are a fair judge, please output the score, confidence, and reasoning for the given conversation."""
@@ -588,7 +747,9 @@ class LLMJudgeValidationModule(BaseValidationModule):
             {"role": "system", "content": system_prompt},
         ]
 
-    def _parse_llm_response(self, response: str, model_name: str = None) -> Dict[str, Any]:
+    def _parse_llm_response(
+        self, response: str, model_name: str = None
+    ) -> Dict[str, Any]:
         result = {"score": 5.0, "confidence": 0, "reasoning": None}
 
         try:
@@ -620,32 +781,34 @@ class LLMJudgeValidationModule(BaseValidationModule):
             return result
 
     def _evaluate_single_conversation(
-            self,
-            conversation_data: Dict[str, Any],
-            eval_args: dict,
-            max_eval_try: int,
-            conv_idx: int,
+        self,
+        conversation_data: Dict[str, Any],
+        eval_args: dict,
+        max_eval_try: int,
+        conv_idx: int,
     ) -> Dict[str, Any]:
         """
         Simplified version: evaluate a single conversation and return scores, confidences, and reasoning
         """
-        conversation_context = self._format_single_conversation(conversation_data)
+        conversation_context, assistant_response = self._format_single_conversation(
+            conversation_data
+        )
         reference = conversation_data.get("reference")
-        messages = self._construct_evaluation_prompt(conversation_context, eval_args.get("prompt_id", 0), reference)
+        tools = conversation_data.get("tools")
+        messages = self._construct_evaluation_prompt(
+            conversation_context,
+            eval_args.get("prompt_id", 0),
+            reference,
+            tools,
+            assistant_response,
+        )
 
         conv_scores = []
         conv_confidences = []
         conv_reasoning = []
 
         # Get available models for evaluation
-        eval_model_list = eval_args.get("eval_model_list", [])
-        available_eval_models = [
-            model for model in eval_model_list if model in self.available_models
-        ]
-
-        # If no models specified or available, use all available models
-        if not available_eval_models:
-            available_eval_models = self.available_models
+        available_eval_models = self._resolve_eval_models(eval_args)
 
         # Evaluate with each model for max_eval_try times
         for model_idx, model_name in enumerate(available_eval_models):
@@ -655,7 +818,9 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 model_eval_args["selected_model"] = model_name
 
                 response, selected_model = self._call_gpt(messages, model_eval_args)
-                parsed_result = self._parse_llm_response(response, model_name=selected_model)
+                parsed_result = self._parse_llm_response(
+                    response, model_name=selected_model
+                )
 
                 conv_scores.append(parsed_result["score"])
                 if parsed_result["confidence"] is not None:
@@ -684,27 +849,21 @@ class LLMJudgeValidationModule(BaseValidationModule):
         # Stage 1: Generate all responses
         logger.info("Stage 1: Generating all conversations for evaluation...")
         all_conversations = self._load_jsonl_conversations(
-            data.base_model,
-            eval_file,
-            data.eval_args,
-            data.context_length
+            data.base_model, eval_file, data.eval_args, data.context_length
         )
 
         # Load evaluation arguments
 
-        max_eval_try = data.eval_args.get("eval_require", 3)  # Default max evaluation tries
+        max_eval_try = data.eval_args.get(
+            "eval_require", 3
+        )  # Default max evaluation tries
         eval_batch_size = self.config.eval_batch_size
 
         # Calculate total evaluation calls
-        eval_model_list = data.eval_args.get("eval_model_list", [])
-        available_eval_models = [
-            model for model in eval_model_list if model in self.available_models
-        ]
-        if not available_eval_models:
-            available_eval_models = self.available_models
+        available_eval_models = self._resolve_eval_models(data.eval_args)
 
         total_eval_calls = (
-                len(all_conversations) * len(available_eval_models) * max_eval_try
+            len(all_conversations) * len(available_eval_models) * max_eval_try
         )
 
         # Stage 2: Direct parallel evaluation of all conversations
@@ -736,17 +895,21 @@ class LLMJudgeValidationModule(BaseValidationModule):
             evaluation_results = []
             completed_count = 0
             total_tasks = len(evaluation_tasks)
-            
+
             for future in as_completed(future_to_task):
                 try:
                     result = future.result()
                     evaluation_results.append(result)
                     completed_count += 1
-                    
+
                     # Calculate progress
-                    evaluations_done = completed_count * len(available_eval_models) * max_eval_try
+                    evaluations_done = (
+                        completed_count * len(available_eval_models) * max_eval_try
+                    )
                     progress_pct = (evaluations_done / total_eval_calls) * 100
-                    logger.info(f"Evaluation progress: {completed_count}/{total_tasks} conversations evaluated ({evaluations_done}/{total_eval_calls} LLM calls, {progress_pct:.1f}%)")
+                    logger.info(
+                        f"Evaluation progress: {completed_count}/{total_tasks} conversations evaluated ({evaluations_done}/{total_eval_calls} LLM calls, {progress_pct:.1f}%)"
+                    )
                 except Exception as e:
                     logger.error(f"Evaluation task failed: {e}")
                     completed_count += 1
@@ -760,8 +923,10 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     )
 
         # Execute all evaluations in parallel
-        logger.info(f"Completed all {total_eval_calls} evaluation calls across {len(all_conversations)} conversations")
-        
+        logger.info(
+            f"Completed all {total_eval_calls} evaluation calls across {len(all_conversations)} conversations"
+        )
+
         all_weighted_scores = []
         all_reasoning = []
         # Process all results
@@ -776,15 +941,19 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 all_reasoning.extend(result["reasoning"])
 
         # Calculate overall averages across all conversations
-        raw_avg_score = sum(all_weighted_scores) / len(all_weighted_scores) if all_weighted_scores else 5.0
+        raw_avg_score = (
+            sum(all_weighted_scores) / len(all_weighted_scores)
+            if all_weighted_scores
+            else 5.0
+        )
         combined_reasoning = "\n\n".join(all_reasoning) if all_reasoning else None
 
         # Normalize the final score to (0, 1) range
         score_finally = self._normalize_score(raw_avg_score)
-        logger.info(f"Overall normalized score_finally (0-1 range): {score_finally:.4f}")
-        return LLMJudgeMetrics(
-            score=score_finally
+        logger.info(
+            f"Overall normalized score_finally (0-1 range): {score_finally:.4f}"
         )
+        return LLMJudgeMetrics(score=score_finally)
 
     def cleanup(self):
         """Clean up resources"""
