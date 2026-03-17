@@ -15,7 +15,6 @@ from typing import List, Dict, Any
 from validator.modules.llm_judge.prompt import get_prompt
 from validator.modules.llm_judge.utils import download_file
 from validator.exceptions import LLMJudgeException, InvalidModelParametersException
-from validator.modules.llm_judge.template import template_dict
 from peft import PeftModel
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from validator.modules.base import (
