@@ -1,5 +1,6 @@
 import os
 import re
+import gc
 import random
 import json
 import httpx
@@ -12,12 +13,12 @@ from openai import OpenAI
 from loguru import logger
 from huggingface_hub import HfApi
 from typing import List, Dict, Any
+from vllm import LLM, SamplingParams
+from transformers import AutoTokenizer
 from validator.modules.llm_judge.prompt import get_prompt
 from validator.modules.llm_judge.utils import download_file
 from validator.exceptions import LLMJudgeException, InvalidModelParametersException
 from validator.modules.llm_judge.template import template_dict
-from peft import PeftModel
-from transformers import AutoTokenizer, AutoModelForCausalLM
 from validator.modules.base import (
     BaseValidationModule,
     BaseConfig,
@@ -67,8 +68,9 @@ class LLMJudgeValidationModule(BaseValidationModule):
         self.config = config
         self.client = None
         self.available_models = []
-        self.hf_model = None
+        self.vllm_engine = None
         self.hf_tokenizer = None
+        self.lora_request = None
 
         # Initialize client and get available models
         self._initialize_client()
@@ -125,28 +127,23 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 raise  # Re-raise the exception if it's not related to the missing file
         return True
 
-    def _load_model(self, repo_id: str, revision: str = "main", max_params: int = None):
+    def _get_model_params(self, repo_id: str, revision: str = "main") -> int:
+        """Get model parameter count from HuggingFace API without loading the model."""
+        try:
+            model_info = api.model_info(repo_id, revision=revision)
+            if model_info.safetensors and hasattr(model_info.safetensors, "total"):
+                return model_info.safetensors.total
+        except Exception as e:
+            logger.warning(f"Could not fetch parameter count from HF API: {e}")
+        return 0
+
+    def _load_model(self, repo_id: str, revision: str = "main", max_params: int = None, context_length: int = None):
 
         is_lora = self._download_lora_config(repo_id, revision=revision)
+        vllm_kwargs = dict(trust_remote_code=True)
+        if context_length:
+            vllm_kwargs["max_model_len"] = context_length
 
-        # Determine best dtype: prefer BF16 for numerical stability, fallback to FP16
-        if torch.cuda.is_available():
-            if torch.cuda.is_bf16_supported():
-                compute_dtype = torch.bfloat16
-                logger.info("Using bfloat16 for better numerical stability")
-            else:
-                compute_dtype = torch.float16
-                logger.info("Using float16 (bfloat16 not supported on this GPU)")
-        else:
-            compute_dtype = torch.float32
-            logger.info("Using float32 (CPU mode)")
-
-        model_kwargs = dict(
-            trust_remote_code=True,
-            torch_dtype=compute_dtype,
-            use_cache=False,
-            device_map="auto",
-        )
         if is_lora:
             api.snapshot_download(
                 repo_id=repo_id,
@@ -157,37 +154,57 @@ class LLMJudgeValidationModule(BaseValidationModule):
             with open("judge/adapter_config.json", "r") as f:
                 adapter_config = json.load(f)
             base_model = adapter_config["base_model_name_or_path"]
+
+            # Load tokenizer for template formatting
             self.hf_tokenizer = AutoTokenizer.from_pretrained(
                 base_model, trust_remote_code=True, use_fast=True, padding_side="left"
             )
-            base_hf_model = AutoModelForCausalLM.from_pretrained(
-                base_model, **model_kwargs
+
+            # Check parameter count of base model
+            total = self._get_model_params(base_model)
+            if total and max_params and total > max_params:
+                logger.info(
+                    f"Total model params: {total} exceeds the limit {max_params}, submitting validation result with a large loss"
+                )
+                raise InvalidModelParametersException(
+                    f"Model parameters {total} exceed limit {max_params}"
+                )
+
+            # Load with vLLM + LoRA
+            lora_rank = adapter_config.get("r", 64)
+            self.vllm_engine = LLM(
+                model=base_model,
+                **vllm_kwargs,
+                enable_lora=True,
+                max_lora_rank=max(lora_rank, 64),
             )
-            hf_model = PeftModel.from_pretrained(
-                base_hf_model,
-                "judge",
-                device_map="auto",
-            )
-            self.hf_model = hf_model.merge_and_unload()
+            from vllm.lora.request import LoRARequest
+            self.lora_request = LoRARequest("adapter", 1, "judge")
+            logger.info(f"Loaded LoRA model via vLLM: base={base_model}, adapter={repo_id}")
         else:
+            # Load tokenizer for template formatting
             self.hf_tokenizer = AutoTokenizer.from_pretrained(
                 repo_id, trust_remote_code=True, use_fast=True, padding_side="left"
             )
-            self.hf_model = AutoModelForCausalLM.from_pretrained(
-                repo_id,
-                torch_dtype=compute_dtype,
-                device_map=None,
-                trust_remote_code=True,
-                low_cpu_mem_usage=True,
+
+            # Check parameter count
+            total = self._get_model_params(repo_id, revision)
+            if total and max_params and total > max_params:
+                logger.info(
+                    f"Total model params: {total} exceeds the limit {max_params}, submitting validation result with a large loss"
+                )
+                raise InvalidModelParametersException(
+                    f"Model parameters {total} exceed limit {max_params}"
+                )
+
+            # Load with vLLM
+            self.vllm_engine = LLM(
+                model=repo_id,
+                revision=revision,
+                **vllm_kwargs,
             )
-        total = sum(p.numel() for p in self.hf_model.parameters())
-        if total > max_params:
-            logger.info(
-                f"Total model params: {total} exceeds the limit {max_params}, submitting validation result with a large loss"
-            )
-            raise InvalidModelParametersException(
-                f"Model parameters {total} exceed limit {max_params}"
-            )
+            self.lora_request = None
+            logger.info(f"Loaded model via vLLM: {repo_id} (revision={revision})")
 
     def _construct_conversation_template(
         self,
@@ -282,137 +299,61 @@ class LLMJudgeValidationModule(BaseValidationModule):
         batch_size: int = 1,
         eval_args: dict = None,
     ) -> list:
-        if self.hf_model is None or self.hf_tokenizer is None:
-            raise LLMJudgeException("HuggingFace model not loaded")
+        if self.vllm_engine is None or self.hf_tokenizer is None:
+            raise LLMJudgeException("vLLM engine not loaded")
 
         try:
+            # Construct all prompts
+            prompts = []
+            for conversation in user_input:
+                template = self._construct_conversation_template(
+                    conversation,
+                    base_model=base_model,
+                )
+
+                if not template or not template.strip():
+                    logger.error(
+                        f"Empty template generated for conversation: {conversation}"
+                    )
+                    raise LLMJudgeException(
+                        f"Empty conversation template generated"
+                    )
+
+                prompts.append(template)
+
+            sampling_params = SamplingParams(
+                temperature=self.config.gen_temperature,
+                top_p=0.95,
+                top_k=50,
+                max_tokens=max_length,
+            )
+
+            logger.info(
+                f"Generating responses for {len(prompts)} conversations using vLLM..."
+            )
+
+            # vLLM handles batching internally with continuous batching
+            outputs = self.vllm_engine.generate(
+                prompts,
+                sampling_params,
+                lora_request=self.lora_request,
+            )
+
             results = []
-            total_batches = (len(user_input) + batch_size - 1) // batch_size
-            for batch_idx, i in enumerate(range(0, len(user_input), batch_size), 1):
-                batch_conversations = user_input[i : i + batch_size]
+            for i, output in enumerate(outputs):
+                assistant_response = output.outputs[0].text.strip()
+                results.append(assistant_response)
 
-                # Apply chat template with fallback
-                batch_conversation_templates = []
-                for conversation in batch_conversations:
-                    template = self._construct_conversation_template(
-                        conversation,
-                        base_model=base_model,
+                # Log sample generated texts for verification
+                if i < 3:
+                    preview = (
+                        assistant_response[:500] + "..."
+                        if len(assistant_response) > 500
+                        else assistant_response
                     )
-
-                    # Validate template is not empty
-                    if not template or not template.strip():
-                        logger.error(
-                            f"Empty template generated for conversation: {conversation}"
-                        )
-                        raise LLMJudgeException(
-                            f"Empty conversation template generated"
-                        )
-
-                    batch_conversation_templates.append(template)
-
-                # Simple tokenization
-                # Only pad when batch_size > 1 to avoid unnecessary overhead
-                model_inputs = self.hf_tokenizer(
-                    batch_conversation_templates,
-                    return_tensors="pt",
-                    add_special_tokens=True,
-                    padding=(batch_size > 1),
-                )
-
-                # Validate tokenization results
-                if (
-                    "input_ids" not in model_inputs
-                    or model_inputs["input_ids"].size(0) == 0
-                ):
-                    logger.error(
-                        f"Tokenization failed for batch {batch_idx}. Templates: {batch_conversation_templates}"
+                    logger.info(
+                        f"[Sample Generation {i + 1}] Response preview:\n{preview}"
                     )
-                    raise LLMJudgeException(
-                        f"Tokenization produced empty input_ids for batch {batch_idx}"
-                    )
-
-                if model_inputs["input_ids"].size(1) == 0:
-                    logger.error(
-                        f"Tokenization produced empty sequences for batch {batch_idx}. Templates: {batch_conversation_templates}"
-                    )
-                    raise LLMJudgeException(
-                        f"Tokenization produced empty sequences for batch {batch_idx}"
-                    )
-
-                # Move to device if available
-                if (
-                    torch.cuda.is_available()
-                    and next(self.hf_model.parameters()).is_cuda
-                ):
-                    model_inputs = {k: v.cuda() for k, v in model_inputs.items()}
-
-                logger.info(
-                    f"Generating batch {batch_idx}/{total_batches} ({min(i + batch_size, len(user_input))}/{len(user_input)} conversations)..."
-                )
-                with torch.no_grad():
-                    outputs = self.hf_model.generate(
-                        **model_inputs,
-                        max_new_tokens=max_length,
-                        temperature=self.config.gen_temperature,
-                        do_sample=True,
-                        top_p=0.95,  # Nucleus sampling for stability
-                        top_k=50,  # Limit vocabulary for stability
-                        pad_token_id=self.hf_tokenizer.eos_token_id,
-                        eos_token_id=self.hf_tokenizer.eos_token_id,
-                    )
-
-                # Validate generation outputs
-                if outputs.size(0) == 0:
-                    logger.error(
-                        f"Model generation produced no outputs for batch {batch_idx}"
-                    )
-                    raise LLMJudgeException(
-                        f"Model generation produced no outputs for batch {batch_idx}"
-                    )
-
-                # Decode responses
-                for j, output in enumerate(outputs):
-                    # Get the input length for this specific sequence
-                    if j >= model_inputs["input_ids"].size(0):
-                        logger.error(
-                            f"Output index {j} out of bounds for input_ids size {model_inputs['input_ids'].size(0)}"
-                        )
-                        continue
-
-                    input_length = model_inputs["input_ids"][j].size(0)
-
-                    # Validate output length
-                    if output.size(0) == 0:
-                        logger.warning(f"Empty output at index {j}, skipping")
-                        results.append("")
-                        continue
-
-                    if input_length > output.size(0):
-                        logger.warning(
-                            f"Input length {input_length} exceeds output length {output.size(0)} at index {j}, using full output"
-                        )
-                        generated_ids = output
-                    else:
-                        # Extract only the newly generated tokens
-                        generated_ids = output[input_length:]
-
-                    assistant_response = self.hf_tokenizer.decode(
-                        generated_ids, skip_special_tokens=True
-                    ).strip()
-
-                    results.append(assistant_response)
-
-                    # Log sample generated texts for verification
-                    global_idx = i + j
-                    if global_idx < 3:  # Log first 3 generated responses
-                        preview = (
-                            assistant_response[:500] + "..."
-                            if len(assistant_response) > 500
-                            else assistant_response
-                        )
-                        logger.info(
-                            f"[Sample Generation {global_idx + 1}] Response preview:\n{preview}"
-                        )
 
             logger.info(f"Completed generating all {len(user_input)} conversations")
             return results
@@ -913,7 +854,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         eval_file = download_file(data.validation_set_url)
 
         try:
-            self._load_model(data.hg_repo_id, data.revision, data.max_params)
+            self._load_model(data.hg_repo_id, data.revision, data.max_params, data.context_length)
         except InvalidModelParametersException as e:
             # lowest possible reward for invalid model parameters
             logger.info(f"Invalid model parameters: {e}")
@@ -1037,16 +978,13 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 pass
         self.client = None
 
-        # Clean up HuggingFace model resources
-        if self.hf_model is not None:
-            try:
-                if torch.cuda.is_available():
-                    self.hf_model.cpu()
-                    torch.cuda.empty_cache()
-                del self.hf_model
-            except Exception:
-                pass
-            self.hf_model = None
+        # Clean up vLLM engine
+        if self.vllm_engine is not None:
+            del self.vllm_engine
+            self.vllm_engine = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
 
         if self.hf_tokenizer is not None:
             del self.hf_tokenizer

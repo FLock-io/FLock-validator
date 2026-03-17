@@ -5,14 +5,10 @@ dependencies:
   - python==3.12
   - pip
   - pip:
+    - vllm>=0.17.0  # High-performance inference engine
     - openai>=1.0.0  # OpenAI API client
     - httpx  # HTTP client for OpenAI requests
     - pydantic>=2.0.0  # Data validation and parsing
-    - transformers==4.49.0  # HuggingFace transformers library
-    - torch>=1.13.1  # PyTorch for model inference
-    - accelerate>=0.27.2  # For efficient model loading
     - loguru>=0.6.0  # Logging library
-    - huggingface-hub==0.29.1
     - tenacity
-    - peft>=0.10.0,<0.18.0
     - python-dotenv  # Load environment variables from .env file
