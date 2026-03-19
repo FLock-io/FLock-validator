@@ -151,7 +151,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 repo_id=repo_id,
                 local_dir="judge",
                 revision=revision,
-                force_download=True,  # Disable fallback to cached files
+                # force_download=True,  # Disable fallback to cached files
             )
             with open("judge/adapter_config.json", "r") as f:
                 adapter_config = json.load(f)
@@ -232,8 +232,16 @@ class LLMJudgeValidationModule(BaseValidationModule):
                         })
 
                     messages += conversation["conversations"]
+                    tools_for_template = conversation.get("tools", None)
+                    try:
+                        if isinstance(tools_for_template, str):
+                            tools_for_template = json.loads(tools_for_template)
+                    except Exception:
+                        # leave tools_for_template as-is if parsing fails
+                        pass
                     template = self.hf_tokenizer.apply_chat_template(
                         messages,
+                        tools=tools_for_template,
                         tokenize=False,
                         add_generation_prompt=True,
                         enable_thinking=False,
@@ -556,10 +564,47 @@ class LLMJudgeValidationModule(BaseValidationModule):
                         for msg in conversations:
                             role = msg.get("role", "")
                             content = msg.get("content", "").strip()
-                            if (
-                                role in ["user", "assistant", "function_call"]
-                                and content
-                            ):
+                            if not content:
+                                continue
+                            if role == "function_call":
+                                # Convert function_call to assistant message with tool_calls
+                                try:
+                                    call_data = json.loads(content)
+                                    tool_call_msg = {
+                                        "role": "assistant",
+                                        "tool_calls": [
+                                            {
+                                                "id": f"call_{len(conversation_to_process)}",
+                                                "type": "function",
+                                                "function": {
+                                                    "name": call_data.get("name", ""),
+                                                    "arguments": call_data.get("arguments", {})
+                                                },
+                                            }
+                                        ],
+                                    }
+                                    conversation_to_process.append(tool_call_msg)
+                                except (json.JSONDecodeError, KeyError):
+                                    # Fallback: treat as plain assistant message
+                                    conversation_to_process.append(
+                                        {"role": "assistant", "content": content}
+                                    )
+                            elif role == "observation":
+                                # Convert observation to tool result message
+                                # Find the last tool_call id to reference
+                                tool_call_id = "call_0"
+                                for prev_msg in reversed(conversation_to_process):
+                                    if prev_msg.get("role") == "assistant" and prev_msg.get("tool_calls"):
+                                        tool_call_id = prev_msg["tool_calls"][0]["id"]
+                                        break
+                                conversation_to_process.append(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": tool_call_id,
+                                        "content": content,
+                                    }
+                                )
+                            elif role in ["user", "assistant"]:
                                 conversation_to_process.append(
                                     {"role": role, "content": content}
                                 )
@@ -567,7 +612,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                         # Extract reference response (last assistant or function_call message)
                         reference_response = None
                         if conversation_to_process:
-                            last_msg = conversation_to_process[-1]
+                            last_msg = conversations[-1]
                             if last_msg["role"] in ["assistant", "function_call"]:
                                 reference_response = last_msg["content"]
                                 conversation_to_process = conversation_to_process[:-1]
@@ -591,6 +636,8 @@ class LLMJudgeValidationModule(BaseValidationModule):
                     continue
 
                 input_conversations_data["conversations"] = conversation_to_process
+                if tools_info is not None:
+                    input_conversations_data["tools"] = tools_info
 
                 input_conversations.append(
                     {
