@@ -151,7 +151,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 repo_id=repo_id,
                 local_dir="judge",
                 revision=revision,
-                # force_download=True,  # Disable fallback to cached files
+                force_download=True,  # Disable fallback to cached files
             )
             with open("judge/adapter_config.json", "r") as f:
                 adapter_config = json.load(f)
