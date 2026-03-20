@@ -12,11 +12,12 @@ from openai import OpenAI
 from loguru import logger
 from huggingface_hub import HfApi
 from typing import List, Dict, Any
-from validator.modules.llm_judge.prompt import get_prompt
+from validator.modules.llm_judge.prompt import get_prompt,template_str
 from validator.modules.llm_judge.utils import download_file
 from validator.modules.llm_judge.constant import SUPPORTED_BASE_MODELS
 from validator.exceptions import LLMJudgeException, InvalidModelParametersException
 from peft import PeftModel
+from jinja2 import Environment
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from validator.modules.base import (
     BaseValidationModule,
@@ -556,7 +557,8 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 conversation_to_process = []
                 reference_response = None
                 tools_info = None
-
+                pending_tool_call_ids: list[str] = []
+                tool_call_counter = 0
                 if "conversations" in json_data:
                     conversations = json_data["conversations"]
                     if isinstance(conversations, list) and conversations:
@@ -567,14 +569,17 @@ class LLMJudgeValidationModule(BaseValidationModule):
                             if not content:
                                 continue
                             if role == "function_call":
-                                # Convert function_call to assistant message with tool_calls
+                                tool_call_counter += 1
+                                tool_call_id = f"call_{tool_call_counter}"
+
                                 try:
                                     call_data = json.loads(content)
                                     tool_call_msg = {
                                         "role": "assistant",
+                                        "content": "",
                                         "tool_calls": [
                                             {
-                                                "id": f"call_{len(conversation_to_process)}",
+                                                "id": tool_call_id,
                                                 "type": "function",
                                                 "function": {
                                                     "name": call_data.get("name", ""),
@@ -585,18 +590,19 @@ class LLMJudgeValidationModule(BaseValidationModule):
                                     }
                                     conversation_to_process.append(tool_call_msg)
                                 except (json.JSONDecodeError, KeyError):
-                                    # Fallback: treat as plain assistant message
+                                    tool_call_id = None
                                     conversation_to_process.append(
                                         {"role": "assistant", "content": content}
                                     )
+                                if tool_call_id:
+                                    pending_tool_call_ids.append(tool_call_id)
+
                             elif role == "observation":
-                                # Convert observation to tool result message
-                                # Find the last tool_call id to reference
-                                tool_call_id = "call_0"
-                                for prev_msg in reversed(conversation_to_process):
-                                    if prev_msg.get("role") == "assistant" and prev_msg.get("tool_calls"):
-                                        tool_call_id = prev_msg["tool_calls"][0]["id"]
-                                        break
+                                if pending_tool_call_ids:
+                                    tool_call_id = pending_tool_call_ids.pop(0)
+                                else:
+                                    tool_call_id = "call_unknown"
+
                                 conversation_to_process.append(
                                     {
                                         "role": "tool",
@@ -611,10 +617,18 @@ class LLMJudgeValidationModule(BaseValidationModule):
 
                         # Extract reference response (last assistant or function_call message)
                         reference_response = None
+
                         if conversation_to_process:
                             last_msg = conversations[-1]
-                            if last_msg["role"] in ["assistant", "function_call"]:
+                            if last_msg["role"] in ["assistant"]:
                                 reference_response = last_msg["content"]
+                                conversation_to_process = conversation_to_process[:-1]
+                            elif last_msg["role"] in ["function_call"]:
+                                env = Environment(trim_blocks=True, lstrip_blocks=True)
+                                conversation_template = env.from_string(template_str)
+                                reference_response = conversation_template.render(
+                                    messages=[conversation_to_process[-1]], trim_blocks=True,
+                                                         lstrip_blocks=True)
                                 conversation_to_process = conversation_to_process[:-1]
 
                         # Extract tools information if available (for function_call evaluation)
