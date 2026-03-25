@@ -181,3 +181,45 @@ Now, please provide a rationale for your score, your confidence of the score, an
         tools=Tools,
         assistant_response=assistant_response,
     )
+
+template_str= """{% for message in messages %}
+
+{% if message.role == "system" %}
+<system>
+{{ message.content }}
+</system>
+
+{% elif message.role == "user" %}
+<user>
+{{ message.content }}
+</user>
+
+{% elif message.role == "assistant" %}
+
+    {% if message.tool_calls %}
+<tool_call>
+    {% for tool in message.tool_calls %}
+<function={{ tool.function.name }}>
+        {% set args = tool.function.arguments %}
+        {% if args is string %}
+        {% set args = args | from_json %}
+        {% endif %}
+        {% for key, value in args.items() %}
+<parameter={{ key }}>{{ value }}</parameter>
+        {% endfor %}
+</function>
+    {% endfor %}
+</tool_call>
+    {% else %}
+<assistant>
+{{ message.content }}
+</assistant>
+    {% endif %}
+{% elif message.role == "tool" %}
+<tool_response>
+{{ message.content }}
+</tool_response>
+
+{% endif %}
+
+{% endfor %}"""
