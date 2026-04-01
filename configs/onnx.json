@@ -1,0 +1,7 @@
+{
+    "per_device_eval_batch_size": 8,
+    "sequence_length": 64,
+    "model_type": "forecasting",
+    "evaluation_metrics": ["mae", "rmse", "mape", "smape"],
+    "output_dir": "/tmp/onnx_validation"
+}
