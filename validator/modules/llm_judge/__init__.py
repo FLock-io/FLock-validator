@@ -509,7 +509,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         def log_retry(retry_state):
             logger.warning(
                 f"API call failed (attempt {retry_state.attempt_number}/3), "
-                f"retrying in {retry_state.next_action.sleep:.1f}s: {retry_state.outcome.exception()}"
+                f"retrying in {retry_state.next_action.sleep:.1f}s: {str(retry_state.outcome.exception())[:200]}"
             )
 
         @retry(
@@ -520,6 +520,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
         )
         def _make_api_call():
             completion = self.client.chat.completions.create(**params)
+            self._parse_check_valid_json(completion.choices[0].message.content)
             return completion.choices[0].message.content
 
         try:
@@ -821,6 +822,17 @@ class LLMJudgeValidationModule(BaseValidationModule):
             {"role": "system", "content": system_prompt},
         ]
 
+    def _parse_check_valid_json(self, response: str,):
+        json_match = re.search(r'\{[^}]*"score"[^}]*\}', response, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(0)
+            parsed_json = json.loads(json_str)
+            _ = float(parsed_json["score"])
+            _ = float(parsed_json["confidence"])
+            _ = str(parsed_json["reasoning"])
+        else:
+            raise
+
     def _parse_llm_response(
         self, response: str, model_name: str = None
     ) -> Dict[str, Any]:
@@ -988,7 +1000,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                         f"Evaluation progress: {completed_count}/{total_tasks} conversations evaluated ({evaluations_done}/{total_eval_calls} LLM calls, {progress_pct:.1f}%)"
                     )
                 except Exception as e:
-                    logger.error(f"Evaluation task failed: {e}")
+                    logger.error(f"Evaluation task failed: {str(e)[:200]}")
                     completed_count += 1
                     # Add default result for failed tasks
                     evaluation_results.append(
