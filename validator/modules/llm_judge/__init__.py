@@ -465,7 +465,7 @@ class LLMJudgeValidationModule(BaseValidationModule):
                 model_parts.append(part)
 
         cleaned_model_name = '-'.join(model_parts) if model_parts else model_name
-        if cleaned_model_name == "kimi-k2.5":
+        if cleaned_model_name == "kimi-k2.5" or cleaned_model_name == "kimi-k2.6":
             extra.setdefault("extra_body", {"thinking": {"type": "disabled"}})
         params["extra_body"] = extra
         return cleaned_model_name, params
@@ -493,9 +493,9 @@ class LLMJudgeValidationModule(BaseValidationModule):
         selected_model, model_params = self._parse_model_name_to_params(eval_model)
 
         # Patch: kimi-k2.5-thinking requires temperature=1 and instant requires temperature=0.6
-        if eval_model == "kimi-k2.5":
+        if eval_model == "kimi-k2.5" or eval_model == "kimi-k2.6":
             temperature = 0.6
-        elif eval_model == "kimi-k2.5-thinking":
+        elif eval_model == "kimi-k2.5-thinking" or eval_model == "kimi-k2.6-thinking":
             temperature = 1
 
         params = {
