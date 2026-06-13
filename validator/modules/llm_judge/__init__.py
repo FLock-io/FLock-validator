@@ -15,6 +15,7 @@ from typing import List, Dict, Any
 from validator.modules.llm_judge.prompt import get_prompt,template_str
 from validator.modules.llm_judge.utils import download_file
 from validator.modules.llm_judge.constant import SUPPORTED_BASE_MODELS
+from validator.modules.llm_judge_model_selection import resolve_eval_models
 from validator.exceptions import LLMJudgeException, InvalidModelParametersException
 from peft import PeftModel
 from jinja2 import Environment
@@ -101,11 +102,11 @@ class LLMJudgeValidationModule(BaseValidationModule):
             self.available_models = [model.id for model in models_response.data]
 
         except Exception as e:
-            # Fallback to common models if API call fails
             logger.error(
-                f"Warning: Failed to fetch models from API ({e}), using fallback models"
+                f"Failed to fetch models from API ({e}). Configured eval_model_list "
+                "will still be used."
             )
-            self.available_models = ["gpt-4o"]
+            self.available_models = []
 
     def _download_lora_config(self, repo_id: str, revision: str) -> bool:
         try:
@@ -374,57 +375,16 @@ class LLMJudgeValidationModule(BaseValidationModule):
         Select evaluation model based on eval_args configuration
         """
         eval_model_list = self._resolve_eval_models(eval_args)
-
-        if eval_model_list:
-            selected_model = random.choice(eval_model_list)
-            logger.info(f"Using eval_model_list: selected {selected_model}")
-            return selected_model
-
-        # random selection from available models
-        selected_model = random.choice(self.available_models)
+        selected_model = random.choice(eval_model_list)
+        logger.info(f"Selected evaluation model: {selected_model}")
         return selected_model
 
     def _resolve_eval_models(self, eval_args: dict) -> List[str]:
         """
-        Resolve requested eval models against provider model list.
-        Supports alias forms like "<model>-low/high" by matching their parsed base model.
-        Returns requested model names (so extra params can still be derived later).
+        Use configured evaluation models as the source of truth.
+        Provider model discovery is only a fallback when no list is configured.
         """
-        requested_models = eval_args.get("eval_model_list", []) if eval_args else []
-        if not requested_models:
-            return self.available_models
-
-        resolved_models = []
-        missing_models = []
-        for requested_model in requested_models:
-            if requested_model in self.available_models:
-                resolved_models.append(requested_model)
-                continue
-
-            parsed_model_name, _ = self._parse_model_name_to_params(requested_model)
-            if parsed_model_name in self.available_models:
-                logger.info(
-                    f"Resolved eval model '{requested_model}' to available model '{parsed_model_name}'."
-                )
-                resolved_models.append(requested_model)
-            else:
-                missing_models.append(requested_model)
-
-        # De-duplicate while preserving order
-        resolved_models = list(dict.fromkeys(resolved_models))
-
-        if missing_models:
-            logger.warning(
-                f"Requested eval models not available and will be skipped: {missing_models}"
-            )
-
-        if not resolved_models:
-            logger.warning(
-                "No requested eval models matched provider list, falling back to all available models."
-            )
-            return self.available_models
-
-        return resolved_models
+        return resolve_eval_models(eval_args, self.available_models)
 
     def _normalize_score(
         self, score: float, min_score: float = 0, max_score: float = 10.0
