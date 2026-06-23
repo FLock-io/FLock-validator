@@ -1,0 +1,12 @@
+name: oonx
+dependencies:
+  - numpy
+  - pandas
+  - scikit-learn
+  - scipy
+  - requests
+  - pyarrow  # For parquet file support
+  - pip
+  - pip:
+    - onnxruntime  # ONNX Runtime for inference
+    - huggingface-hub  # For downloading models from HuggingFace

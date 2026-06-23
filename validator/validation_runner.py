@@ -5,7 +5,7 @@ from loguru import logger
 from .exceptions import RecoverableException
 from .api import FedLedger
 from .config import load_config_for_task
-from .modules.base import BaseValidationModule, BaseConfig, BaseInputData, BaseMetrics
+from .modules.base import BaseValidationModule, BaseInputData, BaseMetrics
 
 class ValidationRunner:
     """
@@ -21,6 +21,7 @@ class ValidationRunner:
         time_sleep: int = 180,
         assignment_lookup_interval: int = 180,
         debug: bool = False,
+        test_mode: bool = False,
     ):
         """
         Initialize the ValidationRunner.
@@ -40,6 +41,7 @@ class ValidationRunner:
         self.time_sleep = time_sleep
         self.assignment_lookup_interval = assignment_lookup_interval
         self.debug = debug
+        self.test_mode = test_mode
         self.api = FedLedger(flock_api_key)
         self._setup_modules()
 
@@ -52,13 +54,12 @@ class ValidationRunner:
             raise ValueError(f"Module {self.module} is not valid for the given task ids. Check task types: {task_types}")
         module_mod = importlib.import_module(f"validator.modules.{self.module}")
         module_cls: type[BaseValidationModule] = module_mod.MODULE
-        # Map config to module instance, and task_id to module instance
-        self.module_config_to_module: dict[BaseConfig, BaseValidationModule] = {}
+        # Map task_id to module instance
         self.task_id_to_module: dict[str, BaseValidationModule] = {}
         for task_id in self.task_ids:
             config = load_config_for_task(task_id, self.module, module_cls.config_schema)
-            self.module_config_to_module.setdefault(config, module_cls(config=config))
-            self.task_id_to_module[task_id] = self.module_config_to_module[config]
+            # Create a new module instance for each task_id
+            self.task_id_to_module[task_id] = module_cls(config=config)
 
     def perform_validation(self, assignment_id: str, task_id: str,input_data: BaseInputData) -> BaseMetrics | None:
         """
@@ -67,16 +68,20 @@ class ValidationRunner:
         module_obj = self.task_id_to_module[task_id]
         for attempt in range(3):
             try:
-                return module_obj.validate(input_data)
+                return module_obj.validate(input_data, task_id=task_id)
             except KeyboardInterrupt:
                 sys.exit(1)
             except RecoverableException as e:
                 logger.error(f"Recoverable exception: {e}")
-                sys.exit(1)
+                if not self.test_mode:
+                    sys.exit(1)
+                return None
             except (RuntimeError, ValueError) as e:
                 logger.error(e)
                 self.api.mark_assignment_as_failed(assignment_id)
-                sys.exit(1)
+                if not self.test_mode:
+                    sys.exit(1)
+                return None
             except Exception as e:
                 logger.error(f"Attempt {attempt + 1} failed: {e}")
                 if attempt == 2:
