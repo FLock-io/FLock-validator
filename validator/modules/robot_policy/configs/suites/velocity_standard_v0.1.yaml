@@ -1,0 +1,18 @@
+# Immutable suite identifier. Bump version when benchmark semantics change.
+suite_id: velocity-standard-v0.1
+# Public nominal-capability suite for commanded locomotion.
+suite_type: standard
+# Number of independent simulator rollouts.
+episodes: 100
+# Master seed controlling deterministic scenario generation.
+suite_seed: 20260904
+# Maximum simulated seconds per episode.
+timeout_s: 5.0
+scenario_distribution:
+  # The velocity task spawns standing; only one initial pose class.
+  initial_states: [standing]
+  perturbations:
+    # Nominal contact-friction range.
+    friction: {min: 0.85, max: 1.0}
+    # Command delay in simulator control steps.
+    command_delay_steps: [0, 1]

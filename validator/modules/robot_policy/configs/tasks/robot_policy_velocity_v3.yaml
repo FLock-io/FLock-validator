@@ -1,0 +1,65 @@
+# RobotPolicy velocity tracking, v3 (2026-09-05). Track a commanded body twist
+# while staying upright, on flat ground, under the deployed runtime's command
+# envelope. Every parameter is explained in TEMPLATE.yaml.
+#
+# WHY THE DESIGN IS WHAT IT IS
+# 1. Error on a 1 s trailing average of body velocity (`velocity_window_s`).
+#    A waddling biped's instantaneous velocity swings at stride frequency, so
+#    an instantaneous error scored Pollen's own walking policy -- 0.11 m/s at
+#    a 0.25 m/s command, in two independent simulators -- as 1.6-1.8, "worse
+#    than a robot that does not move", and passed 0/40. Windowed it reads 0.5:
+#    walking at half the commanded speed, which is what it does. A motionless
+#    policy still reads exactly 1.0.
+# 2. Commands from the DEPLOYMENT envelope (`command_envelope`): forward 0.25,
+#    backward 0.2, no lateral, yaw +-1.0 -- the limits infer_policy.py
+#    enforces. Training ranges (vx +-0.4, vy +-0.3) asked for things the robot
+#    is never asked; a lateral 0.3 made the official policy fall.
+# 3. One command per episode: the env's own 3-8 s resample could land inside
+#    a 5 s episode, which a windowed metric would score as lag.
+#
+# CALIBRATION (velocity-standard-v0.1, this bar, 100 episodes, 2026-09-05,
+# after the command-delay fix -- earlier runs had command_delay_steps
+# silently 0 after the first zero-delay scenario):
+#
+#   policy                                    pass     95% CI     windowed rel. error
+#   untrained (0 iters, 40 episodes)           0/40    0-9%       1.01  (= do nothing; falls 40/40)
+#   official BEST_alpha_walking, batched 40   20/100   13-29%     0.767
+#   5000-iteration in-env export, batched 40  61/100   51-70%     0.564
+#   same export, sequential (--batch 1)       53/100   43-62%     0.599
+#
+# Reachable, ordered, and doing nothing sits exactly on the baseline. Pass
+# rates at other bars, for the record (40-episode runs): official 0/17/38/50%
+# and a 4000-iteration export 45/62/68/85% at 0.5/0.6/0.7/0.8.
+task_family: velocity
+mjlab_task_id: Mjlab-Velocity-Flat-MicroDuck
+command_envelope:
+  lin_vel_x:
+  - -0.2
+  - 0.25
+  lin_vel_y:
+  - 0.0
+  - 0.0
+  ang_vel_z:
+  - -1.0
+  - 1.0
+one_command_per_episode: true
+
+success_predicate:
+  # Trailing window (s) over which body velocity is averaged before it is
+  # compared with the command. 0 = instantaneous (the v2 behaviour).
+  velocity_window_s: 1.0
+  # Episode fails outright if the trunk ever tilts past this (degrees).
+  max_tilt_deg: 45
+  # Mean tracking error as a FRACTION of mean commanded magnitude.
+  # 1.0 == "moved as little as standing still"; lower is better.
+  max_mean_relative_error: 0.60
+  # Commands smaller than this are scored against this value, not their own
+  # magnitude (m/s equivalent, yaw weighted by ang_weight).
+  cmd_magnitude_floor: 0.10
+  # Per-sample absolute error still counted as "in tolerance".
+  per_step_error_tol: 0.30
+  # ...or this fraction of the commanded magnitude, whichever is larger, so a
+  # brisk command is not held to the same absolute band as a crawl.
+  rel_step_tol: 0.50
+  # Weight applied to the yaw-rate error term when combining with linear error.
+  ang_weight: 0.5

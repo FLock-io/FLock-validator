@@ -1,0 +1,7 @@
+{
+  "task_config": "validator/modules/robot_policy/configs/tasks/robot_policy_velocity_v3.yaml",
+  "output_dir": ".cache/robot_policy",
+  "batch": 1,
+  "build_seed": 0,
+  "device": "cuda:0"
+}

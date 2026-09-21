@@ -1,0 +1,9 @@
+name: robot_policy
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      # Conda resolves this path relative to this environment.yml.
+      - -r requirements-runtime.txt

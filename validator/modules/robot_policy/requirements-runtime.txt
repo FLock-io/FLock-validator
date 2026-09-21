@@ -1,0 +1,26 @@
+# Physics/task versions from microduck_rl's lockfile at the commit below.
+# Keep these fixed together: newer MuJoCo-Warp/Warp releases remove mjlab APIs.
+mjlab-microduck @ https://github.com/pollen-robotics/microduck_rl/archive/1e79c29c97d8b38aee9eefde77a545860ba7658e.zip
+# Use the BAM commit in that lockfile, not the moving mjlab_frictionloss branch
+# or PyPI's hardware-oriented BAM package. Only the simulation core is needed.
+better-actuator-models @ https://github.com/Rhoban/bam/archive/62bd8ce12154340be97e06f7f41a0ca8f116d967.zip
+mjlab==1.3.0
+mujoco==3.10.0
+mujoco-warp==3.8.1
+warp-lang==1.12.0
+torch==2.9.1
+numpy==2.4.1
+onnx==1.22.0
+onnxruntime==1.24.4
+protobuf==6.33.6
+scipy==1.18.0
+
+# Validator and standalone call_validator_test.py dependencies.
+pydantic>=2,<3
+loguru
+click
+requests>=2.32,<3
+gitpython
+python-dotenv
+pyyaml
+huggingface-hub>=0.27.0

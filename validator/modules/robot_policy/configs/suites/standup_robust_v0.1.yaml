@@ -1,0 +1,20 @@
+# Immutable robustness-suite identifier.
+suite_id: standup-robust-v0.1
+# Controlled-perturbation evaluation suite.
+suite_type: robustness
+# Number of independent simulator rollouts.
+episodes: 100
+# Master seed controlling deterministic scenario generation.
+suite_seed: 20260903
+# Maximum simulated seconds per episode.
+timeout_s: 5.0
+scenario_distribution:
+  # Same task starts under harder environment conditions.
+  initial_states: [face_down, face_up, sitting]
+  perturbations:
+    # Lower-friction range than Standard.
+    friction: {min: 0.55, max: 0.85}
+    # Increased command delay in control steps.
+    command_delay_steps: [1, 2, 3]
+    # Battery voltage reserved for the real official-simulator adapter.
+    battery_voltage: {min: 6.5, max: 7.5}

@@ -1,0 +1,92 @@
+# =====================================================================
+# SCORING TEMPLATE — copy to configs/scoring/<your_task>_vX.yaml and edit
+# =====================================================================
+# Turns a result.json into ONE number, in two layers:
+#
+#   layer 1   score_substrate = Σ wᵢ · normalize(metricᵢ)   (base + task_specific)
+#   layer 2   final           = Σ Wₛ · score_substrate(s)   (simulation + hardware)
+#
+# and multiplies by GATES, which are pass/fail and are not part of any sum.
+#
+# ---------------------------------------------------------------------
+# THREE RULES, each of which exists because ignoring it produces a number
+# that looks fine and means nothing
+# ---------------------------------------------------------------------
+# 1. NORMALIZE BEFORE WEIGHTING. The metrics have different units and
+#    directions (success rate is [0,1] higher-better; completion time is
+#    seconds lower-better). Every entry therefore declares `direction` and
+#    `range`, and is mapped to [0,1] before its weight applies. Weights are
+#    then dimensionless and mean what you think they mean.
+#
+# 2. GATES ARE NOT WEIGHTS. A weighted sum lets a good metric mask a fatal
+#    one: a policy that falls over every episode but tracks velocity nicely
+#    still scores well. Correctness conditions multiply the score by 0.
+#    (Same reason AGENTS.md prefers multiplicative composites over additive
+#    stacks at goal states.)
+#
+# 3. DECLARE THE POPULATION. A metric computed only over SUCCESSFUL episodes
+#    is not comparable between policies with different success rates, and it
+#    rewards failing. Measured on this benchmark: the 29%-success walking
+#    policy scored BETTER on completion time (0.800) than the 46%-success
+#    standup policy (0.785), because failing removes your slow episodes from
+#    the average. `mean_success_completion_time_s` is therefore REFUSED by
+#    the scorer; use `mean_time_to_success_imputed_s`, which charges every
+#    failure the full timeout and is defined over all episodes.
+#
+# 4. WEIGHTS ARE NOT PRECISION. A hardware arm is ~12 episodes against
+#    simulation's 100, and its Wilson interval is huge (measured:
+#    [0.089, 0.532]). Weighting sim:hardware 1:1 is a legitimate DECISION
+#    ("the robot is what we care about"), but it is NOT a statement that the
+#    two are equally reliable. Always read `per_substrate` and the episode
+#    counts next to the blended number, never the blend alone.
+# ---------------------------------------------------------------------
+
+# Bump this whenever any weight or threshold below changes. Scores computed
+# under different specs are NOT comparable; `comparable_key` in the output
+# makes that checkable instead of a matter of trust.
+scoring_id: standup-score-v0.2
+
+# ---- layer 2: substrate blend --------------------------------------
+# A substrate that was not measured has its weight DROPPED (not
+# redistributed), and `effective_substrate_weights` in the output records
+# what was actually used. So a simulation-only score can never be mistaken
+# for a sim+hardware score just because both are on a 0-1 scale.
+substrate_weights:
+  simulation: 1.0
+  hardware: 1.0        # automatically ignored until a hardware run exists
+
+# ---- gates: pass/fail, any failure => score 0 ------------------------
+# `episodes_ran`, `full_suite` and `benchmark_substrate` (mock is refused)
+# are always applied. List extra boolean metrics here if your adapter emits
+# them.
+gates: []
+
+# ---- layer 1a: BASE metrics ----------------------------------------
+# Metrics that mean the same thing for EVERY task family, so scores stay
+# comparable across tasks. Keep this list short and stable.
+base:
+  - metric: task_success_rate
+    weight: 0.7
+    direction: higher      # higher | lower
+    range: [0.0, 1.0]      # values are clamped into this before normalising
+
+# ---- layer 1b: TASK-SPECIFIC metrics -------------------------------
+# Whatever your adapter's metrics() returns. These make the score sensitive
+# to HOW the task was done, not just whether it was done.
+task_specific:
+  - metric: mean_stable_fraction
+    weight: 0.2
+    direction: higher
+    range: [0.0, 1.0]
+
+  # Time to success, with FAILURES CHARGED THE FULL TIMEOUT (right-censored).
+  # population: all episodes. Do NOT use mean_success_completion_time_s here --
+  # the scorer refuses it, see rule 3 above.
+  - metric: mean_time_to_success_imputed_s
+    weight: 0.1
+    direction: lower       # faster is better
+    # range is absolute and comes from the frozen suite, NOT from the local
+    # sample: every validator uses the same [0, timeout_s], so the same raw
+    # value normalises identically everywhere. The range is hashed into
+    # `comparable_key`, so a spec that changed it cannot be silently compared.
+    range: [0.0, 5.0]      # = suite timeout_s

@@ -1,0 +1,13 @@
+# Local smoke-test suite; task and phase must match the validator inputs.
+suite_id: velocity-local-training-v1
+suite_type: standard
+mjlab_task_id: Mjlab-Velocity-Flat-MicroDuck
+validation_phase: training
+episodes: 3
+suite_seed: 20260904
+timeout_s: 5.0
+scenario_distribution:
+  initial_states: [standing]
+  perturbations:
+    friction: {min: 0.85, max: 1.0}
+    command_delay_steps: [0, 1]

@@ -1,0 +1,15 @@
+# Immutable suite identifier. v0.1 is NOT edited -- a frozen suite stays frozen;
+# recalibrating the success predicate changes benchmark semantics and therefore
+# bumps the version.
+suite_id: standup-standard-v0.2
+# Same scenario distribution as v0.1; only the predicate threshold changed.
+suite_family: standup-standard
+suite_type: standard
+episodes: 100
+suite_seed: 20260902
+timeout_s: 5.0
+scenario_distribution:
+  initial_states: [face_down, face_up, sitting]
+  perturbations:
+    friction: {min: 0.85, max: 1.0}
+    command_delay_steps: [0, 1]
