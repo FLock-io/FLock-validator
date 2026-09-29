@@ -214,6 +214,11 @@ def _apply_resource_limits(
         resource.setrlimit(key, (soft, hard))
 
 
+# O_PATH descriptors kept open for the worker's lifetime; see
+# _install_linux_filesystem_sandbox for why the /proc entries must stay pinned.
+_PINNED_PROC_DESCRIPTORS: list[int] = []
+
+
 def _install_linux_filesystem_sandbox(model_dir: Path) -> None:
     """Restrict miner file access with unprivileged Linux Landlock.
 
@@ -344,13 +349,46 @@ def _install_linux_filesystem_sandbox(model_dir: Path) -> None:
             temp_root,
             handled,
         )
+        # procfs builds a fresh inode for /proc/<pid> whenever its dentry is
+        # dropped, so a rule attached to it silently stops matching. Hold O_PATH
+        # descriptors on the worker's OWN /proc/<pid> and /proc/<pid>/task for its
+        # whole lifetime so those dentries, and the rules on them, stay put. The
+        # CUDA driver reads /proc/self/fd and names its threads through
+        # /proc/self/task/<tid>/comm; without both, CUDA init fails with error 304
+        # (verified on an L40, driver 580). No other process's /proc is granted.
+        own_proc = Path(f"/proc/{os.getpid()}")
+        for path, access in (
+            (own_proc, read_access),
+            (
+                own_proc / "task",
+                read_access | ACCESS_WRITE_FILE | (ACCESS_TRUNCATE & handled),
+            ),
+        ):
+            descriptor = os.open(path, os.O_PATH | os.O_CLOEXEC)
+            _PINNED_PROC_DESCRIPTORS.append(descriptor)
+            attr = PathBeneathAttr(access, descriptor)
+            if (
+                libc.syscall(
+                    445,  # landlock_add_rule
+                    ruleset_fd,
+                    LANDLOCK_RULE_PATH_BENEATH,
+                    ctypes.byref(attr),
+                    0,
+                )
+                != 0
+            ):
+                raise OSError(
+                    ctypes.get_errno(), f"landlock_add_rule failed for {path}"
+                )
         for path in (
             Path("/dev"),
-            Path("/proc/self"),
             Path("/proc/driver/nvidia"),
             Path("/proc/cpuinfo"),
             Path("/proc/meminfo"),
             Path("/proc/stat"),
+            # Read by the CUDA driver during initialisation; without it CUDA
+            # init fails with error 304 (verified on an RTX A6000, driver 570).
+            Path("/proc/sys/vm/mmap_min_addr"),
             Path("/sys"),
         ):
             if path.exists():
@@ -539,6 +577,25 @@ def _install_linux_seccomp() -> None:
         raise RuntimeError(f"Unsupported seccomp architecture: {architecture}")
     if architecture in {"x86_64", "amd64"}:
         blocked.add(56 | 0x40000000)  # deny the x32 clone ABI entirely
+    # (socket, connect, bind, setsockopt, getsockopt, listen). The CUDA driver
+    # needs a local AF_UNIX socket during initialisation: it probes for an MPS
+    # control daemon (connect, ENOENT when absent) and binds and listens on an
+    # abstract "cuda-uvmfd-*" socket. Denying these makes CUDA init fail with
+    # error 304. socket/connect get dedicated rules below; bind/setsockopt/
+    # getsockopt/listen are allowed because they only ever act on an AF_UNIX
+    # socket (every other address family is refused at socket()), and accept
+    # stays blocked so a listening socket can never take a connection. Their
+    # x32 aliases stay blocked.
+    unix_socket_calls = (
+        (41, 42, 49, 54, 55, 50)
+        if architecture in {"x86_64", "amd64"}
+        else (198, 203, 200, 208, 209, 201)
+    )
+    socket_nr, connect_nr = unix_socket_calls[0], unix_socket_calls[1]
+    blocked.difference_update(unix_socket_calls)
+    if architecture in {"x86_64", "amd64"}:
+        blocked.update(nr | 0x40000000 for nr in unix_socket_calls)
+    AF_UNIX = 1
 
     # Classic BPF: load syscall number, return EPERM for each blocked syscall,
     # and allow everything else. CUDA ioctls and normal threading remain usable.
@@ -587,6 +644,19 @@ def _install_linux_seccomp() -> None:
         # Make glibc fall back from clone3 to the flag-checked clone syscall.
         SockFilter(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 435),
         SockFilter(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ERRNO | errno.ENOSYS),
+        # socket(): AF_UNIX only, so no IP/netlink/packet socket can ever exist.
+        SockFilter(BPF_JMP | BPF_JEQ | BPF_K, 0, 4, socket_nr),
+        SockFilter(BPF_LD | BPF_W | BPF_ABS, 0, 0, 16),  # args[0] = domain
+        SockFilter(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, AF_UNIX),
+        SockFilter(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ALLOW),
+        SockFilter(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ERRNO | errno.EPERM),
+        # connect(): always "no such socket". Landlock does not mediate connecting
+        # to pathname UNIX sockets, so allowing connect would expose host daemons
+        # (e.g. docker.sock). ENOENT is exactly what CUDA sees when no MPS daemon
+        # runs, so GPU init proceeds normally. sendto/sendmsg stay blocked, so an
+        # unconnected datagram socket cannot reach anything either.
+        SockFilter(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, connect_nr),
+        SockFilter(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ERRNO | errno.ENOENT),
     ]
     for syscall_number in sorted(blocked):
         instructions.append(SockFilter(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, syscall_number))

@@ -819,12 +819,21 @@ def load_policy(model_dir, device, dtype):
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux seccomp behavior")
 def test_adapter_worker_denies_network_filesystem_and_process_escape(tmp_path: Path):
+    import socket as host_socket
+
     model_dir = tmp_path / "model"
     model_dir.mkdir()
     secret_path = tmp_path / "validator-secret.txt"
     secret_path.write_text("must-not-be-readable")
+    # A live host daemon socket (stands in for e.g. /var/run/docker.sock). Landlock
+    # does not mediate UNIX connect, so seccomp must refuse it.
+    daemon_path = tmp_path / "host-daemon.sock"
+    daemon = host_socket.socket(host_socket.AF_UNIX, host_socket.SOCK_STREAM)
+    daemon.bind(str(daemon_path))
+    daemon.listen(1)
     (model_dir / "flock_robotics_adapter.py").write_text(
         f"""
+import os
 import socket
 import subprocess
 import numpy as np
@@ -833,33 +842,122 @@ class Policy:
     def act(self, obs):
         return np.zeros(7, dtype=np.float32)
 
+def _unix_connect():
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect({str(daemon_path)!r})
+
+def _unix_sendto():
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    s.sendto(b"x", {str(daemon_path)!r})
+
 def load_policy(model_dir, device, dtype):
+    probes = [
+        socket.socket,
+        lambda: socket.socket(socket.AF_INET6, socket.SOCK_STREAM),
+        lambda: socket.socket(socket.AF_NETLINK, socket.SOCK_RAW),
+        _unix_connect,
+        _unix_sendto,
+        socket.socketpair,
+        # only the worker's own /proc entries are granted, never another process's
+        lambda: open("/proc/%d/cmdline" % os.getppid()).read(),
+        lambda: open({str(secret_path)!r}).read(),
+        lambda: subprocess.run(["/bin/true"], check=True),
+    ]
     denied = 0
-    try:
-        socket.socket()
-    except OSError:
-        denied += 1
-    try:
-        open({str(secret_path)!r}).read()
-    except OSError:
-        denied += 1
-    try:
-        subprocess.run(["/bin/true"], check=True)
-    except OSError:
-        denied += 1
-    if denied == 3:
+    for probe in probes:
+        try:
+            probe()
+        except OSError:
+            denied += 1
+    # allowed: a bare local socket (the CUDA driver creates one)
+    socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET).close()
+    if denied == len(probes):
         return Policy()
     raise RuntimeError("one or more sandbox boundaries were not enforced")
 """
     )
 
+    try:
+        policy = load_policy_from_adapter(
+            model_dir, "flock_robotics_adapter.py", "cpu", "float32"
+        )
+        try:
+            assert policy.act({}).shape == (7,)
+        finally:
+            policy.close()
+    finally:
+        daemon.close()
+
+
+def _cuda_available() -> bool:
+    try:
+        import torch
+    except ImportError:
+        return False
+    return bool(torch.cuda.is_available())
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux" or not _cuda_available(), reason="needs Linux with a CUDA GPU"
+)
+def test_adapter_worker_runs_cuda_inside_the_sandbox_within_the_memory_cap(tmp_path: Path):
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "flock_robotics_adapter.py").write_text(
+        """
+import numpy as np
+import torch
+
+class Policy:
+    def __init__(self, device):
+        self.device = device
+        self.net = torch.nn.Linear(7, 7).to(device)
+
+    def act(self, obs):
+        x = torch.zeros(1, 7, device=self.device)
+        return self.net(x).detach().cpu().numpy()[0].clip(-1, 1)
+
+def load_policy(model_dir, device, dtype):
+    return Policy(device)
+"""
+    )
     policy = load_policy_from_adapter(
-        model_dir, "flock_robotics_adapter.py", "cpu", "float32"
+        model_dir,
+        "flock_robotics_adapter.py",
+        "cuda",
+        "bfloat16",
+        memory_limit_bytes=4 * 1024**3,
     )
     try:
         assert policy.act({}).shape == (7,)
     finally:
         policy.close()
+
+    oversize = tmp_path / "oversize"
+    oversize.mkdir()
+    (oversize / "flock_robotics_adapter.py").write_text(
+        """
+import numpy as np
+import torch
+
+class Policy:
+    def act(self, obs):
+        return np.zeros(7, dtype=np.float32)
+
+def load_policy(model_dir, device, dtype):
+    policy = Policy()
+    policy.big = torch.empty(int(8 * 1024**3), dtype=torch.uint8, device=device)
+    return policy
+"""
+    )
+    with pytest.raises(RoboticsSubmissionError):
+        load_policy_from_adapter(
+            oversize,
+            "flock_robotics_adapter.py",
+            "cuda",
+            "bfloat16",
+            memory_limit_bytes=4 * 1024**3,
+        )
 
 
 # --- Issue 1: bad submissions are scored, never crash the validator ----------
