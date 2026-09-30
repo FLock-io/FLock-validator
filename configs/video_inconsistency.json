@@ -1,0 +1,28 @@
+{
+  "suite_version": "video_inconsistency_v2",
+  "device": "cuda",
+  "torch_dtype": "bfloat16",
+  "package_cache_dir": ".cache/video_inconsistency/package_cache",
+  "detector_load_timeout_seconds": 600,
+  "detect_timeout_seconds": 60,
+  "detector_memory_limit_gb": 18,
+  "detector_cpu_time_seconds": 7200,
+  "detect_retries": 2,
+  "max_failed_clip_fraction": 0.25,
+  "tiou_thresholds": [0.3, 0.4, 0.5, 0.6, 0.7],
+  "tiou_threshold": 0.3,
+  "bbox_iou_threshold": 0.3,
+  "min_event_seconds": 0.4,
+  "confidence_threshold": 0.5,
+  "max_predictions_per_clip": 25,
+  "difficulty_weights": {
+    "easy": 1.0,
+    "medium": 1.5,
+    "hard": 2.0,
+    "expert": 2.5
+  },
+  "weight_map": 0.75,
+  "weight_f1": 0.0,
+  "weight_localization": 0.2,
+  "weight_clip_accuracy": 0.05
+}

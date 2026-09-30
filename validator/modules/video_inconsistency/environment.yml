@@ -1,0 +1,25 @@
+name: video_inconsistency
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.10,<3.12
+  - pip
+  - numpy
+  - scipy
+  - pillow
+  - pip:
+    - accelerate
+    - av
+    - einops
+    - huggingface-hub
+    - imageio-ffmpeg
+    - onnxruntime
+    - opencv-python-headless
+    - peft
+    - safetensors
+    - scikit-learn
+    - timm
+    - torch
+    - torchvision
+    - transformers

@@ -46,6 +46,20 @@ python run.py \
 python run.py lora --task_ids 123,456 --flock-api-key $FLOCK_API_KEY --hf-token $HF_TOKEN
 ```
 
+#### Video Inconsistency
+
+```bash
+python run.py video_inconsistency --task_ids "$VIDEO_TASK_ID" --flock-api-key "$FLOCK_API_KEY" --hf-token "$HF_TOKEN"
+```
+
+Trainers submit any detector (code plus weights) behind a small adapter. The validator runs it in a sandbox against short videos with hidden injected inconsistencies (frozen or dropped frames, reversed or mirrored segments, splices, colour/exposure jumps, zooms, inserted objects, blurred regions) mixed with legitimate look-alike events, and scores ranked detections with mean average precision plus localisation. A single submission can be checked without FedLedger:
+
+```bash
+python run.py video_inconsistency --local-validation --hf-model-repo <repo-or-dir> --validation-data-url <package.zip> --device cpu
+```
+
+For the submission contract, scoring formula, sandbox guarantees and a failure-mode FAQ see [`validator/modules/video_inconsistency/README.md`](validator/modules/video_inconsistency/README.md); trainers start from [`validator/modules/video_inconsistency/trainer_sample/`](validator/modules/video_inconsistency/trainer_sample/README.md).
+
 ### Environment Variables
 You can set the following environment variables instead of passing them as CLI options:
 - `FLOCK_API_KEY`

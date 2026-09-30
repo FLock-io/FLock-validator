@@ -1,0 +1,9 @@
+# Packages for running the trainer sample locally (training, packaging, upload).
+# The sandbox that runs your detector has its own fixed package set (see README).
+numpy
+torch
+safetensors
+huggingface_hub
+imageio-ffmpeg
+pydantic
+pillow
